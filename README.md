@@ -17,7 +17,7 @@ directory.
 
 The sources and documents created by BBN have an Apache 2.0 license;
 materials copied or derived from third-party software are marked
-with the original license.
+with their original licenses.
 
 ## Original site text
 
@@ -146,11 +146,15 @@ Source tarball
 
 `sha256sum: e4dc89d1f98557f486153e590be15bb5acb12e74f572e46ef2b0ddf31ab2b8ff *curveball-2014.12.19.tgz`
 
+Note that there are release notes and other instructions in the 2014.12.19/docs directory.
+
 **2014.06.18**
 
 `2014.06.18/curveball-2014.06.18.tgz`
 
 `sha256sum: ccfdcdb3b435f810bbf4ff1508d52905f0d03d34eda45a94981c2801ec2d85ce *curveball-2014.06.18.tgz`
+
+Note that there are release notes and other instructions in the 2014.06.18 directory.
 
 **Errata**
 
@@ -218,7 +222,4 @@ may change in future releases.
 *This document does not contain technology or technical data controlled
 under either the U.S. International Traffic in Arms Regulations or
 the U.S. Export Administration Regulations. E17-2W2Z*
-
-
-
 

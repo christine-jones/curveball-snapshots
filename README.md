@@ -181,11 +181,13 @@ For example, consider a topology where router0 sends all the
 client-to-decoy packets through router2, and router3 sends all
 decoy-to-client packets through router1:
 
+`
 >                  +-> router2 -> dr -+
 >                  |                  |
 >    client <-> router0            router3 <-> decoy
 >                  |                  |
 >                  +<--- router1 <----+
+`
     
 In this case, router2 should be used as the value of the --clientname
 parameter because the packets from the client arrive at the dr on

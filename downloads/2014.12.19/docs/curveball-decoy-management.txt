@@ -1,0 +1,194 @@
+DECOY HOST MANAGEMENT GUIDE - version 2014.12.19
+
+Blacklisting Decoys in BBN Curveball
+
+This document describes how and why to blacklist candidate Decoy Hosts
+in BBN Curveball, which is a new feature introduced in spiral 6
+(phase 3) of development.  The examples are intended for use with the
+standard development release within a testbed, not installations on the
+Internet.
+
+This document does not provide an introduction to basic Curveball terms
+and descriptions of the Curveball components.  The reader is assumed to
+be familiar with BBN Curveball, including how to install and use BBN
+Curveball and perform the NOC operations.
+
+See the end of this document for a change log since 2013-09-28.
+
+INTRODUCTION
+
+The power of Curveball is that any host that serves a protocol that
+Curveball can hijack (currently HTTPS and HTTP) has the potential to
+serve as a "Decoy Host", and provide a way for Curveball users to
+conceal the real destination they are accessing and the protocols they
+use during that access.  In practice, however, there are reasons why
+some hosts should not be used as decoys:
+
+ - "Honey pot" hosts controlled or monitored by the adversary.  This
+    includes all hosts inside the network controlled by the adversary.
+    (Even if the decoy routers are all outside the control of the
+    adversary, the adversary may stack their internal routing tables to
+    cause routes to internal locations to be routed through ASes that
+    they suspect contains decoy routers.)
+
+ - Some hosts use different network stack parameters than the Curveball
+    decoy proxies, which means that the connections may have detectable
+    differences after Curveball has hijacked them.  For example, some
+    hosts use a different TCP timestamp clock frequency, which means
+    that the initial timestamps in the connection (pre-hijack) change at
+    a different frequency than later timestamps (post-hijack) for the
+    Curveball tunnels that terminate and rebuild the connection.  In a
+    significant number of cases, an eavesdropper can detect that the
+    clock frequency has changed, raising suspicion that the connection
+    has been hijacked.
+
+ - Some hosts use protocol variants that Curveball cannot hijack
+    successfully, or cannot hijack without generating anomalous network
+    traffic that could reveal the presence of Curveball user.  For
+    example, some web servers only implement the HTTP 1.0 subset of HTTP
+    1.1 (they accept some HTTP 1.1 requests, but respond as if the
+    requests were HTTP 1.0).  Curveball will not respond to these sites
+    in the way that an ordinary client would, providing an potential way
+    for an adversary to detect that Curveball (or some other hidden
+    proxy) is in use.
+
+Decoy host blacklisting provides a way to inform the decoy routers that
+certain hosts (or subnets of hosts) must not be used as decoys, even if
+connections to those hosts contain Curveball sentinels and follow the
+Curveball protocol.
+
+TERMS AND DEFINITIONS
+
+    BASEDIR - the directory where Curveball is installed.  If
+	installed in the Debian package, this is /opt/curveball.  If
+	you are running from a development build, then BASEDIR is the
+	build subdirectory of your development tree (e.g.,
+	$HOME/curveball/build)
+
+    SCRIPTDIR - $BASEDIR/scripts
+
+    BLACKLISTFILE - a file containing a list of the hosts or subnets to
+        blacklist.  The format of this file is described below.
+
+        The BLACKLISTFILE is not archived or managed in any way by the
+        Curveball software.  The administrator is responsible for proper
+        management of this file.
+
+    NOTE: Commands that require an effective UID of root are prefixed
+	with sudo.
+
+CONFIGURING HOSTNAMES
+
+Some of the NOC tools use rsync to copy data from the NOC
+node to the DP and DR nodes.  They assume that the NOC, DP,
+and DR nodes have been configured to allow the operator to
+ssh from the NOC to the DP and DR nodes.  The tools for managing
+the decoy host blacklist are among these tools.
+
+To change the names of the hosts used as DRs, you must edit
+the file:
+
+    /opt/curveball/scripts/cbnoc-push-baddh-rem
+
+Near the end of this script, there is a loop that runs over
+all of the DR nodes according to the naming convention used
+in our testbeds.  Change it to use whatever DR names you have
+in your system, and make sure that invokes the push_dr function
+for each of them.
+
+In future releases, this will be make easier to configure.
+
+QUICK TUTORIAL - For NOC Operations
+
+The "NOC" implements operations that would ordinarily be done by a
+Network Operations Center.  The NOC tools described here emulate these
+operations, but in a testing framework (lacking security and integrity
+guarantees).
+
+The "NOC" may be any node that has connectivity with all of the DR and
+DP nodes; it may be a DR or DP node.
+
+    * Returning to a pristine state
+
+        In the initial configuration, no decoys are blacklisted.
+	To restore things to their initial, post-install state:
+
+            sudo $SCRIPTDIR/cbnoc-bdh-setup /dev/null
+
+        This should remove the blacklist (i.e., the file
+        $BLACKLISTFILE) on all DRs within 10-15 seconds.
+
+        It is not necessary to restart the DRs.
+
+        NOTE: depending on the local permissions, this command might
+        need to be run via sudo.  It should not be run as root.
+
+        NOTE: the DR's blacklist can be updated even if the DR is not
+        running; when the DR is started it will use the most recent
+        blacklist pushed by cbnoc-bdh-setup
+
+    * Blacklisting hosts or subnets
+
+        1. Add the hosts and/or subnets to the $BLACKLISTFILE
+
+        2. Use cbnoc-bdh-setup to compile and push the changes:
+
+            sudo $SCRIPTDIR/scripts/cbnoc-bdh-setup $BLACKLISTFILE
+
+        NOTE: depending on the local permissions, this command might
+        need to be run via sudo.  It should not be run as root.
+
+NOTE: There is no API for adding or removing a host or subnet: these
+operations are NOT cumulative, but instead completely reset the
+blacklist.
+
+BLACKLIST FILE FORMAT
+
+Each line in the blacklist file specifies one host or subnet that is
+blacklisted. Each specification is one of the following:
+
+ - A DNS hostname or IPv4 address
+
+ - An IPv4 routing prefix (a DNS or an IPv4 address, a "/", and the number of
+    bits in the prefix)
+
+ - A DNS hostname or IPv4 network prefix followed by an IPv4 network mask.
+
+The blacklist file may contain blank lines and comments (which
+start with a '#' character and continue to the end of the line).
+Whitespace at the start and end of each line is ignored.
+
+A netmask of 0.0.0.0 may be used to effectively blacklist all IPv4 addresses.
+
+For example:
+
+        # blacklist example.com:
+        example.com
+
+        # blacklist everything on the same /24 as example.com:
+        example.com/24
+
+        # blacklist everything on the same /24 as example.com,
+        # but using a netmask instead of a routing prefix:
+        example.com 255.255.255.0
+
+        # blacklist everything on 10.1.0.0/16:
+        10.1.0.0 255.255.0.0    # by netmask
+        10.1.0.0/16             # by routing prefix
+
+cbnoc-bdh-setup does detect many errors, but also permits many silly
+things (such as blacklisting broadcast addresses).  Do not rely on
+cbnoc-bdh-setup to catch all of your errors.
+
+
+CHANGELOG
+
+2014-10-01
+
+- Removed note about netmask of 0.0.0.0 NOT being permitted. A netmask of
+    0.0.0.0 may now be used to effectively blacklist all IPv4 addresses.
+
+ACKNOWLEDGMENTS
+
+This product includes software developed in part by support from the Defense
+Advanced Research Project Agency (DARPA) Contract No. N66001-11-C-4017. 

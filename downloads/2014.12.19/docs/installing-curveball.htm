@@ -1,0 +1,385 @@
+<html>
+  <head>
+    <title>Installing and setting up BBN Curveball - version 2014.12.19</title>
+  </head>
+  <body>
+    <h1>Installing and setting up BBN Curveball - version 2014.12.19</h1>
+
+    <p>
+    This document describes how to install BBN Curveball from a Debian package
+    on Ubuntu 12.04.
+    </p>
+
+    <p>
+    The current Debian package includes both the client and server software
+    and documentation.
+    This package is intended for experimentation, not deployment;
+    in the future the client and server software will be separate packages.
+    </p>
+
+    <h2> Model network </h2>
+
+    <p>
+    For the sake of the examples in this document,
+    assume that BBN Curveball is to be installed on a network
+    that has the basic properties as the network illustrated
+    below:
+    </p>
+
+    <pre>
+                              + -- decoy
+                              |
+    client -- filter -- dr -- + -- dp
+                              |
+                              + -- covert
+    </pre>
+
+    <p>
+    In this example network,
+    the <tt>filter</tt> and <tt>dr</tt> nodes are routers,
+    and the <tt>client</tt>, <tt>decoy</tt>, <tt>dp</tt>,
+    and <tt>covert</tt> are end hosts.
+    The essential properly of this network is that
+    packets from the client to the decoy (or from any client
+    to any decoy, if there are more than one of each) must
+    traverse the decoy router <tt>dr</tt>.
+    </p>
+
+    <p>
+    In this example,
+    the goal of the <tt>client</tt> is to access
+    a web site running on the <tt>covert</tt> node,
+    but there are filters or firewall rules installed
+    on the <tt>filter</tt> router that the client from access
+    <tt>covert</tt> directly.
+    The <tt>filter</tt> does permit the client to
+    access a web site running on the <tt>decoy</tt> node.
+    </p>
+
+    <p>
+    The names of the nodes
+    are significant to some of our example scripts,
+    these instructions, and certificates provided in the package.
+    They can be changed, but it will be simpler
+    to begin by using them.
+    </p>
+
+    <h2> Install the BBN Curveball package </h2>
+
+    <p>
+    Let <i>CB.DEB</i> be the path to the BBN Curveball package file.
+    </p>
+
+    <p>
+    On each of the dr, dp, client, decoy, and covert nodes
+    in the experiment:
+    </p>
+
+    <pre>
+    sudo apt-get update
+    sudo dpkg -i CB.DEB
+    sudo apt-get -y -f install
+    </pre>
+
+    <p>
+    Note that the <tt>dpkg</tt> command may fail if any dependency is not
+    satisfied.  The last command uses <tt>apt-get</tt> to fetch
+    and install any missing dependencies, and finishes the installation.
+    </p>
+
+    <p>
+    Note that the current BBN Curveball package installs all of its
+    software on all of the nodes.
+    </p>
+
+    <h2> [optional] Change the VPN nameservers </h2>
+
+    <p>
+    <i>This step is only necessary if you plan to have the client
+    use VPN mode, and want to use specific DNS servers instead
+    of the Google public DNS servers.</i>
+    </p>
+
+    <p>
+    On each dp node, edit the file
+    <tt>/opt/curveball/scripts/decoyproxy.conf</tt>.
+    Change the line that defines the nameservers to use
+    in VPN mode to use whatever nameservers you prefer.
+    Note that the comma-separated list of nameservers
+    must contain only IPv4 addresses (not hostnames) and
+    must not contain any whitespace.
+    </p>
+
+    <p>
+    The original line looks like:
+    </p>
+
+    <pre>
+    nameservers = 8.8.8.8,8.8.4.4 ; FIXME: won't work on DETER
+    </pre>
+
+    <h2> [optional] Testbed configuration </h2>
+
+    <h3> [optional] Install the BBN Curveball CA certificate
+      on the client </h3>
+
+    <p>
+    BBN Curveball provides a CA certificate
+    <tt>/opt/build/curveball/auth/CA/CURVEBALL_CA.pem</tt>,
+    for testing purposes.
+    <i> This certificate (or certificates signed by this CA)
+      should <b>never</b> be used outside of a closed testbed.
+    They are only intended for testing.</i>
+    Installing this certificate as a trusted CA may have serious
+    security implications, and should only be done on a test node
+    that is isolated from the Internet.
+    </p>
+
+    <p>
+    To simplify testing,
+    BBN Curveball includes a number of host certificates
+    signed by the BBN Curveball test CA,
+    but these cerficates will not be trusted unless the
+    BBN Curveball test CA is trusted.
+    </p>
+
+    <p>
+    The test CA certificate only needs to be installed on the client.
+    To install the test certificate, run the following command on the client:
+    </p>
+
+    <pre>
+    sudo /opt/curveball/scripts/curveball-install-test-ca-cert
+    </pre>
+
+    <p>
+    The <tt>curveball-install-test-ca-cert</tt> script
+    installs the BBN Curveball test CA certificate
+    (or whatever certificate is specified on its commandline)
+    as trusted by the local host.
+    </p>
+
+    <p>
+    If the installation of the CA certificate is a success,
+    <tt>openssl</tt>
+    can be used to verify the certificate as valid.
+    For example, the command:
+    </p>
+
+    <pre>
+    openssl verify /opt/curveball/auth/CA/CURVEBALL_CA.pem
+    </pre>
+
+    <p>
+    will print:
+    </p>
+
+    <pre>
+    /opt/curveball/auth/CA/CURVEBALL_CA.pem: OK
+    </pre>
+
+    <p>
+    If the corresponding certificate has been installed correctly.
+    </p>
+
+    <p>
+    <b>Note:</b> To remove the BBN Curveball test CA certificate,
+    remove the cert file from
+    <tt>/usr/local/share/ca-certificates/cb/</tt>
+    and then run:
+    </p>
+
+    <pre>
+    sudo /usr/sbin/update-ca-certificates --fresh
+    </pre>
+
+    <h3> [optional] Install the host certificates </h3>
+
+    <p>
+    The BBN Curveball release includes a number of host certificates,
+    signed by the BBN Curveball test CA.
+    These are intended to be installed on nodes that will
+    be running web servers or other services that require
+    a valid host certificate.
+    </p>
+
+    <p>
+    <i> These certificates are intended for use <b>only</b> for
+      testing purposes and should <b>never</b> be used on sites
+      directly accessible from the Internet. </i>
+    </p>
+
+    <p>
+    The test host certificates only need to be installed on
+    the decoy and covert hosts.
+    To install a test host certificate,
+    use the command:
+    </p>
+
+    <pre>
+    sudo /opt/curveball/scripts/cb-install-test-node-cert
+    </pre>
+
+    <p>
+    This utility will pick the proper certificate, based on
+    the host name, and install it and its private key.
+    </p>
+
+    <p>
+    <b>Note:</b> on some systems,
+    it may be necessary to <tt>chgrp</tt> the
+    contents of <tt>/etc/ssl/private</tt> after modifying
+    the certificate database:
+    </p>
+
+    <pre>
+    /bin/chgrp ssl-cert /etc/ssl/private/*.key
+    </pre>
+
+    <p>
+    To remove this certificate and its private key,
+    delete them from <tt>/etc/ssl/certs</tt> and
+    <tt>/etc/ssl/private/</tt>.
+
+
+    <h3> [optional] Creating private keys </h3>
+
+    <p>
+    The BBN Curveball release contains sample keys that are
+    useful for testing.  <i>Because these keys are published (and included
+    in every release) they should be considered to be completely insecure
+    and never used on systems connected to the Internet.</i>
+    </p>
+
+    <h4> [optional] Creating/modifying the master file </h4>
+
+    <p>
+    This step should be done on the <tt>dp</tt> node.
+    </p>
+
+    <p>
+    To remove all of the test keys,
+    delete files <tt>/opt/curveball/auth/keys/master.km</tt>
+    and <tt>/opt/curveball/auth/keys/master.km.orig</tt>
+    on each host running BBN Curveball.
+    </p>
+
+    <p>
+    To add a new key,
+    on the decoy proxy node,
+    use <tt>/opt/curveball/scripts/cbnoc-keymanager</tt>:
+    </p>
+
+    <pre>
+    sudo /opt/curveball/scripts/cbnoc-keymanager add NEWKNAME
+    </pre>
+
+    <p>
+    creates a new key, chosen randomly, with name <i>NEWKNAME</i>.
+    Each key has a unique name, which is typically used to
+    associate that key with a specific user or purpose.
+    </p>
+
+    <p>
+    Use the <tt>help</tt> directive to get more information
+    about the features of <tt>cbnoc-keymanager</tt>:
+    </p>
+
+    <pre>
+    sudo /opt/curveball/scripts/cbnoc-keymanager help
+    </pre>
+
+    <h4> [optional] Distributing keys to users </h4>
+
+    <p>
+    Each line in <tt>/opt/curveball/auth/keys/master.km</tt> is
+    a single key.
+    The lines for each user's keys should be copied into the
+    <tt>/opt/curveball/auth/keys/master.km</tt> file on
+    that user's client node.
+    </p>
+
+    <h3> Setting the user's key </h3>
+
+    <p>
+    On each client, configure the client to use the correct subset of
+    the keys available.  Each client should use a different set of keys.
+    Curveball can be detected if users share keys carelessly.
+    </p>
+
+    <p>
+    NOTE: there is no default key.  It is required to pick a key.
+    </p>
+
+    <p>
+    Keys are selected by <i>kname</i>.
+    The <tt>curveball-key-config</tt> script lists all the <i>knames</i> in the
+    local master key file if invoked with the <tt>-a</tt> option:
+    </p>
+
+    <pre>
+    sudo /opt/curveball/scripts/curveball-key-config -a
+    </pre>
+
+    <p>
+    The default master file
+    (provided in this release for testing purposes)
+    has keys with names <tt>cbtest0</tt> through <tt>cbtest4</tt>.
+    (There are also keys with names
+    <tt>cbtest5</tt> through <tt>cbtest99</tt>,
+    but by default these are commented out.)
+    To configure the client to use kname <tt>cbtest0</tt>:
+    </p>
+
+    <pre>
+    sudo /opt/curveball/scripts/curveball-key-config -c cbtest0
+    </pre>
+
+    <p>
+    The <tt>curveball-key-config</tt> script may be rerun at any time to change
+    keys, add additional keys, or remove keys.
+    Note that if the same key is added more than once, there
+    is no change to the state.
+    </p>
+
+    <p>
+    The <tt>curveball-key-config</tt> script can also print the current
+    state of the key:
+    </p>
+
+    <pre>
+    sudo /opt/curveball/scripts/curveball-key-config -p
+    </pre>
+
+    <p>
+    This will print something similar to the following:
+    </p>
+
+    <p>
+    <tt>
+      kname cbtest0 key ae653dabd7def0b6c9be6d0ba55001376cae0e295641e241889d85431f3446728bd6b2b0eee6301dd46bb1332762bb98be957c71e49fd46c699f0c0c156bbed53e9b8ce448b1e7d5f950a1277133762dc3b18041b30d3b8ca73cf918aefa9c32b8604e66c82f16acc38f0e182ddb59da502d4406b5096954583e1e457080c891f33527c462e5250ce33f3f2ccc34ee1f8a72e12f3132a2180c8c84b5b9098739ad06695240e7cff1031ce4d84bb127b9ce46ac9c3e3fc754ce54c3ebccba73ec3ff17303d42dd783928e5b9c98e13b482ca15b214295f5a24ab0bbb83dc77f8d5c26aeae417efe05ba29fd06cce73c37d21e67024fcd7a1be38388b6fa6a48ea remaining 128 sentinels_per_epoch 128 epoch_length 3600 next_epoch_start 1402430400
+    </tt>
+    </p>
+
+    <p>
+    To reset the client state, use the -c flag.  For example, the
+    following command will reset the client to use the key with kname
+    <tt>cbtest1</tt>, and reset the sentinels:
+    </p>
+
+    <pre>
+    sudo /opt/curveball/scripts/curveball-key-config -c cbtest1
+    </pre>
+
+    <h2> Acknowledgements </h2>
+
+    <p>
+    This product includes
+    software developed in part by support from the
+    Defense Advanced Research Project Agency (DARPA)
+    Contract No. N66001-11-C-4017.
+    </p>
+
+  </body>
+</html>
+

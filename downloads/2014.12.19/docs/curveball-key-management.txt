@@ -1,0 +1,259 @@
+KEY MANAGEMENT GUIDE - version 2014.12.19
+
+Key Management in BBN Curveball
+
+This document describes how BBN Curveball client keys are managed in the
+spiral 8 version of BBN Curveball.  The examples are intended for use with
+the standard development release within a testbed, not installations
+on the Internet.
+
+See the end of this document for a change log since 2013-09-24.
+
+TERMS AND DEFINITIONS
+
+    BASEDIR - the directory where BBN Curveball is installed.  If
+	installed via the Debian package, this is /opt/curveball.  If
+	you are running from a development build, then BASEDIR is the
+	build subdirectory of you development tree (e.g.,
+	$HOME/curveball/build)
+
+    SCRIPTDIR - $BASEDIR/scripts
+
+    MASTER FILE - the central repository for information about keys.
+	By default, this is BASEDIR/auth/keys/master.km.
+
+    KNAME - a mnemonic "name" for a key.  Most key operations use the
+	kname instead of the literal key.  Knames must be unique; a
+	kname must not appear twice in the master file.
+
+    NOTE: Commands that require an effective UID of root are prefixed
+	with sudo.
+
+
+QUICK TUTORIAL - For NOC Operations
+
+The "NOC" implements operations that would ordinarily be done by a
+Network Operations Center, including the generation of keys and
+distribution of key-related information to the other nodes.  The NOC
+tools described here emulate these operations, but in a testing
+framework (lacking security and integrity guarantees).
+
+The "NOC" may be any node that has connectivity with all of the DR and
+DP nodes; it may be a DR or DP node.
+
+The devel install includes 5 active keys, with knames "cbtest0"
+through "cbtest4".
+
+CONFIGURING HOSTNAMES
+
+Some of the NOC tools use rsync to copy data from the NOC
+node to the DP and DR nodes.  They assume that the NOC, DP,
+and DR nodes have been configured to allow the operator to
+ssh from the NOC to the DP and DR nodes.
+
+By default, the tools assume that the DP and DR nodes are named
+using a convention than is used by our development testbeds,
+but is unlikely to be used anywhere else.  To accommodate this,
+the DR and DP names may be provided in a file that is passed
+as a parameter to these NOC tools, via the "-f" parameter.
+
+The format of this file is as follows:
+
+    * Each line must begin with a comment character "#", "dr:", or "dp:" 
+
+    * Everything between a # and the end of the line is treated as
+	a comment.
+
+    * The "dr:" and "dp:" lines each specify one DR or DP.  For example:
+
+	    dr: xxx 
+	    dp: yyy 
+
+	indicates that "xxx" is a DR and "yyy" is a DP.  Note that a
+	host can be treated as both a dr and dp. 
+
+If a network name is specified (via the -n option) then that network 
+name is added to each name in the host file.  For example, using 
+option "-n example.com" would cause hostname "xxx" to be treated as 
+"xxx.example.com" 
+
+In the examples below, we omit the use of the "-f host-file" parameter
+for the sake of clarity, but in ordinary deployments this flag would
+be present in every invocation that pushes data out to the DRs and DPs
+(i.e., any time cbnoc-keymanager is invoked with the -p flag or given
+the "push" command).
+
+EXAMPLE TASKS
+
+    * Returning to a pristine state
+
+	To restore things to their post-install state:
+
+	    sudo cp $BASEDIR/auth/keys/master.km.orig \
+		    $BASEDIR/auth/keys/master.km
+
+	    sudo $SCRIPTDIR/cbnoc-keymanager push
+
+	It may be necessary to stop and restart all of the DPs and
+	DRs, or wait until the beginning of the next sentinel epoch,
+	before all state is completely restored.
+
+    * Adding a new key
+
+	Adding a new kname results in the creation of a new key.
+
+	There is no API for choosing a specific key; Curveball chooses
+	the keys randomly.  (It is possible to edit
+	$BASEDIR/auth/keys/master.km directly, but this circumvents
+	most of the error checking and should not be done lightly.)
+
+	To create a new key and update the master file by associating
+	this KNAME with this new key:
+
+	    sudo $SCRIPTDIR/cbnoc-keymanager add KNAME
+
+	For example, to add a new key named "cbtest101":
+
+	    sudo $SCRIPTDIR/cbnoc-keymanager add cbtest101
+
+	Note that this only updates the master file, and does not push
+	the changes to all of the other nodes.  
+
+	Pushing the changes can be a time-consuming task.  If you have
+	multiple changes to make, it is quicker to make all of the
+	changes before doing a push.  It is possible to immediately
+	push the changes, by adding the -p flag:
+
+	    sudo $SCRIPTDIR/cbnoc-keymanager -p add KNAME
+
+    * Finding the key and current status for a kname
+
+	    sudo $SCRIPTDIR/cbnoc-keymanager query KNAME
+
+	prints the line for the given KNAME from the master file.
+
+    * Revoking a key
+
+	This does not remove the key from the master file, but only
+	marks it as revoked.  This prevents unintentional reuse of the
+	same kname while the key is revoked.
+
+	    sudo $SCRIPTDIR/cbnoc-keymanager revoke KNAME
+
+	The -p flag can be used to push the change immediately, or
+	multiple revocations can be batched, followed by a push.
+
+    * View all the knames in the master file
+
+	sudo $SCRIPTDIR/cbnoc-keymanager knames
+
+    * View the contents of the master file
+
+	sudo $SCRIPTDIR/cbnoc-keymanager list
+
+    NOC NOTES:
+
+    	* Keys are used to generate sentinels. A client uses the
+	    sentinels generated by a key, not the key itself, to
+	    connect to Curveball.
+
+	* Key revocation prevents clients from creating NEW Curveball
+	    connections with that key, but does not sever established
+	    Curveball connections.  In the future there will be.
+	    additional functionality for severing live connections.
+
+	* If the debugging sentinel (aka the "deadbeef" sentinel) is
+	    enabled, it cannot be revoked.  This sentinel is not
+	    associated with any key, and therefore it cannot be
+	    revoked or changed.  Note that the debugging sentinel is
+	    meant only for testing, and is FORBIDDEN outside isolated
+	    testbeds.
+
+	* cbnoc-keymanager also supports rekeying a kname, and
+	    unrevoking a kname.  The "unrevoke" operation is meant
+	    only for testing, and is FORBIDDEN outside isolated testbeds.
+	    If a key is compromised, it should be revoked and never
+	    unrevoked -- it should be rekeyed, or simply removed. 
+
+	* The operations that make a key "active" (add, unrevoke, and
+	    rekey) may or may not take effect until the beginning of
+	    the next sentinel epoch (by default at the beginning of
+	    the next hour, or the next time the DR/DP pair are
+	    restarted), even if pushed immediately.  Revocation,
+	    however, happens within several seconds of a push.
+
+
+QUICK TUTORIAL - For Client and User Operations
+
+The user is given one or more lines from the master file to use as
+keys.  It is the responsibility of the entity doing the key
+distribution to ensure that no two users have the same keys.
+
+For the devel/test install, each client gets a copy of the original
+master file and, by default, all users are configured to use the same
+key until this default is overridden.  This is not a realistic key
+distribution protocol, but it simplifies testing.
+
+    * To get a list of all knames available to the user:
+
+        sudo $SCRIPTDIR/curveball-key-config
+
+	Note that the client, unlike the NOC, does not use
+	cbnoc-keymanager.
+
+    * To reset the sentinel manager and drop all keys in use:
+
+        sudo $SCRIPTDIR/curveball-key-config -c
+
+	The -c refers to clearing the state.
+
+    * To reset the sentinel manager and switch to using the key KNAME:
+
+	sudo $SCRIPTDIR/curveball-key-config -c KNAME
+
+    * To add an additional key NEW-KNAME, leaving any current keys
+	in place:
+
+	sudo $SCRIPTDIR/curveball-key-config NEW-KNAME
+
+    * To add multiple KNAMEs, leaving any current keys in place:
+
+	sudo $SCRIPTDIR/curveball-key-config KNAME KNAME1 KNAME2 ...
+
+    CLIENT NOTES:
+
+        NOTE: The BBN Curveball user MUST configure a key before the
+	    client will work.  (For convenience, the startup scripts
+	    provided with Curveball configure all users to use the key
+	    'cbtest0'.  If you configure or startup Curveball using
+	    other scripts, you will need to run curveball-key-config
+	    and add a key before keys will work.
+
+	NOTE: Repeatedly starting the client can exhaust the sentinel
+	    pool, which is currently limited to 128 sentinels per hour
+	    per key.  (This default can be changed, but it is awkward.)
+	    The client will report when it cannot allocate a sentinel.
+
+	    Resetting the client key configuration by removing all keys
+	    and then adding the user's key will cause the client to
+	    "forget" that the pool has been exhausted and create a new
+	    pool.
+
+	    For example, to return the client to the same initial
+	    state with key KNAME before each invocation:
+
+	    sudo $SCRIPTDIR/curveball-key-config -c KNAME 
+
+	    This is INSECURE (the same sentinel may be reused repeatedly),
+	    and is intended only for testing.
+
+
+CHANGELOG
+
+ * Added description of the "-f host-file" and "-n domainname" parameters
+    for cbnoc-keymanager
+
+ACKNOWLEDGMENTS
+
+This product includes software developed in part by support from the Defense
+Advanced Research Project Agency (DARPA) Contract No. N66001-11-C-4017. 

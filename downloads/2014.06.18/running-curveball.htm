@@ -1,0 +1,277 @@
+<html>
+  <head>
+    <title>Running BBN Curveball - version 2014.06.18</title>
+  </head>
+  <body>
+    <h1>Running BBN Curveball - version 2014.06.18</h1>
+
+    <p>
+    This document describes how to run BBN Curveball,
+    after it has been installed,
+    on Ubuntu 12.04.
+    </p>
+
+    <p>
+    See the <a href="installing-curveball.htm">
+      instructions for installing BBN Curveball</a>
+    for more information about how to install the software
+    and the assumptions about the network topology.
+    </p>
+
+    <h2> Starting BBN Curveball </h2>
+
+    <h3> [optional] Starting a simple web server </h3>
+
+    <p>
+    BBN Curveball includes a simple web server that may be
+    useful to run on the <tt>decoy</tt> or <tt>covert</tt>
+    nodes to test the basic functionality of the system.
+    It can also be used as a standalone server for a
+    web site with static content.
+    </p>
+
+    <p>
+    To start the basic web server in the default mode:
+    </p>
+
+    <pre>
+    sudo /opt/curveball/scripts/mini-httpd -q &amp;
+    </pre>
+
+    <p>
+    <tt>mini-httpd</tt> 
+    starts a web server that listens on both port 80 (for HTTP)
+    and port 443 (for HTTPS), returns pages that begin with a generic
+    header, followed by a HTML page containing the name of the host, the
+    path of the URL requested, the protocol, and filler content.
+    </p>
+
+    <h3> Generating and updating the sentinel sets </h3>
+
+    <p>
+    <i>Note: this document does not describe the tools for doing
+    central key management and revocation.
+    These facilities will be documented in a future
+    release.</i>
+    </p>
+
+    <p>
+    If you modified the <tt>master.km</tt> key file earlier,
+    the copy the master files
+    <tt>/opt/curveball/auth/keys/master.km</tt>
+    and
+    <tt>/opt/curveball/auth/keys/master.km.orig</tt>
+    from the node where you modified them to
+    all of the other <tt>dr</tt> and <tt>dp</tt> nodes.
+    </p>
+
+    <p>
+    On each <tt>dr</tt> and <tt>dp</tt> node, run the following command:
+    </p>
+
+    <pre>
+    cd ; sudo /opt/curveball/scripts/cbkm -C push
+    </pre>
+
+    <p>
+    This will create the sentinel sets needed for 16 hours of operation.
+    </p>
+
+    <p>
+    This command can be re-run periodically
+    (from a <tt>cron</tt> job, or otherwise)
+    to generate new sentinel sets before they are needed.
+    The sentinel 
+    </p>
+
+    <p>
+    Any time the <tt>master.km</tt> file is changed,
+    this process must be repeated.
+    </p>
+
+    <h2> Starting BBN Curveball - SOCKS mode </h2>
+
+    <h3> Bidirectional TLS mode</h3>
+
+    <p>
+    On the <tt>dp</tt>, run the following command:
+    </p>
+
+    <pre>
+    sudo /opt/curveball/scripts/decoyproxy.py
+    </pre>
+
+    <p>
+    After the <tt>decoyproxy</tt> is ready,
+    run the following command on the <tt>dr</tt> node:
+    </p>
+
+    <pre>
+    sudo /opt/curveball/scripts/dr.py --decoyproxy dp:4001 \
+            --decoyname decoy --clientname client
+    </pre>
+
+    <p>
+    <b>Note:</b>
+    these instructions assume that the names of the <tt>dp</tt>,
+    <tt>client</tt>, and <tt>decoy</tt> nodes are as shown above.
+    If the node names are changed, then this commandline may have
+    to change accordingly.
+    The requirements are that:
+    </p>
+    
+    <ul>
+      <li> The <tt>clientname</tt> must be the name of a host whose
+      route is via the ingress interface (for packets from a client
+      to a decoy) of the <tt>dr</tt></li>
+      <li> The <tt>decoyname</tt> must be the name of a host whose
+      route is via the egress interface (for packets from a client
+      to a decoy) of the <tt>dr</tt></li>
+      <li> The <tt>decoyproxy</tt> is the name of the decoy proxy
+      for this decoy router </li>
+    </ul>
+
+    <p>
+    <b>Note:</b> If the <tt>decoyproxy.py</tt> process exits for any reason,
+    the <tt>dr.py</tt> process will lose its connection to it and also exit.
+    Therefore whenever you restart <tt>decoyproxy.py</tt> (for example, to
+    change its commandline) you must also restart <tt>dr.py</tt>.
+    </p>
+
+    <p>
+    Before the client can run, the <tt>decoy</tt> web server must be started.
+    Instructions for starting the example BBN Curveball web server are
+    given above.
+    </p>
+
+    <p>
+    When the <tt>dp</tt>, <tt>dr</tt>, and <tt>decoy</tt> servers are
+    running, start on the <tt>client</tt> node, start the BBN Curveball client:
+    </p>
+
+    <pre>
+    sudo /opt/curveball/scripts/client.py -x -d decoy:443
+    </pre>
+
+    <p>
+    This will print out a sequence of messages.
+    If successful, these messages will stop after printing
+    something similar to:
+    </p>
+
+    <pre>
+    Client: Connected to CT_Client
+    CCP has connected to CT, starting CCP server...
+    Curveball ready
+    </pre>
+
+    <p>
+    If unsuccessful, <tt>client.py</tt> will exit
+    after printing an error message.
+    </p>
+
+    <p>
+    <b>Note:</b> sometimes the client will fail to find BBN Curveball,
+    even if everything is operating properly.
+    If there is an error saying that there is no decoy router
+    on the path to the decoy, try again after a moment.
+    </p>
+
+    <h3> Unidirectional TLS mode </h3>
+
+    <p>
+    The instructions for unidirectional mode are the same as
+    bidirectional, except add the <tt>-u</tt> flag to the commandline
+    for the decoy proxy and the client.
+    </p>
+
+    <p>
+    <b>Note:</b> the unidirectional tunnel does not always connect,
+    even when the DR and DP are running and configured correctly.
+    If it fails, try again.
+    </p>
+
+    <h3> Unidirectional or bidirectional HTTP mode </h3>
+
+    <p>
+    The instructions for HTTP mode (unidirectional or bidirectional)
+    are the same as bidirectional TLS mode, except add the <tt>-w</tt>
+    flag to the commandline on the client, and change the decoy port to 80:
+    </p>
+
+    <pre>
+    # bidirectional:
+    sudo /opt/curveball/scripts/client.py -x -d decoy:80 -w
+
+    # unidirectional:
+    sudo /opt/curveball/scripts/client.py -x -d decoy:80 -w -u
+    </pre>
+
+    <h2> Using the BBN Curveball SOCKS proxy </h2>
+
+    <p>
+    While <tt>client.py</tt> is running in SOCKS mode on the client,
+    it creates a SOCKS proxy running at <tt>localhost:5010</tt>.
+    Any application that can use SOCKS can access the network
+    via that proxy:
+    </p>
+
+    <pre>
+    curl --socks localhost:5010 http://covert
+    </pre>
+
+    <p>
+    If there is a web server listening on port 80 on <tt>covert</tt>,
+    this <tt>curl</tt> will fetch and display the raw contents of that
+    page via BBN Curveball.
+    </p>
+
+    <h2> Starting the BBN Curveball client - VPN mode </h2>
+
+    <p>
+    VPN mode will be documented in a future release.
+    </p>
+
+    <h2> [optional] Install firewall rules on the filter </h2>
+
+    <p>
+    To show that BBN Curveball is able to bypass a simple firewall,
+    you can add iptables rules to drop traffic on the filter node:
+    </p>
+
+    <pre>
+    sudo /sbin/iptables -A FORWARD -d covert -j DROP
+    </pre>
+
+    <p>
+    This will drop all traffic routed through the filter that has a
+    destination of <tt>covert</tt>, which means that <tt>client</tt>
+    can no longer connect directly to <tt>covert</tt>/
+    </p>
+
+    <p>
+    <b>Note:</b> this command is meant as an example only; you might not want
+    to block all traffic, and you might want to block subnets instead
+    of hosts, etc.
+    </p>
+
+    <p>
+    To restore the <tt>iptables</tt> rules to their default state:
+    </p>
+
+    <pre>
+    sudo /sbin/iptables -F
+    </pre>
+
+    <h2> Acknowledgements </h2>
+
+    <p>
+    This product includes
+    software developed in part by support from the
+    Defense Advanced Research Project Agency (DARPA)
+    Contract No. N66001-11-C-4017.
+    </p>
+
+  </body>
+</html>
+

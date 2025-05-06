@@ -1,0 +1,72 @@
+#!/usr/bin/env python
+#
+# This material is based upon work supported by the Defense Advanced
+# Research Projects Agency under Contract No. N66001-11-C-4017.
+#
+# Copyright 2014 - Raytheon BBN Technologies Corp.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or
+# implied.  See the License for the specific language governing
+# permissions and limitations under the License.
+
+
+"""
+A utility to flush the state when the keys change
+
+On macosx, the tempdir for each user is kept in a separate
+place, and therefore this only cleans out the state associated
+with the euid of the process.
+"""
+
+import binascii
+import os
+import sys
+import tempfile
+
+# The directory that this executable lives in.
+#
+DIRNAME = os.path.normpath(
+        os.path.abspath(os.path.dirname(sys.argv[0]) or '.'))
+
+sys.path.append(os.path.normpath(os.path.join(DIRNAME, '..', 'python')))
+
+import cb.sentman.keystate
+import cb.sentman.selfserve
+
+if len(sys.argv) != 2:
+    print 'ERROR: usage %s curveball-key-file' % sys.argv[0]
+    exit(1)
+
+KEYFILE = sys.argv[1]
+STATEFILE = os.path.join(tempfile.gettempdir(), 'cbsmd-ss')
+
+try:
+    NEW_KEY = cb.sentman.keystate.load_key(KEYFILE)
+    if os.path.exists(STATEFILE):
+        LINES = open(STATEFILE).readlines()
+        KEYS = [ cb.sentman.keystate.SentmanKey.from_str(line).key
+                for line in LINES ]
+        HEX_KEYS = [ binascii.hexlify(key) for key in KEYS ]
+
+        if (len(KEYS) != 1) or (not binascii.hexlify(NEW_KEY) in HEX_KEYS):
+            print "Flushing/recreating the key state"
+            os.unlink(STATEFILE)
+            cb.sentman.selfserve.SentmanSelfServe(NEW_KEY)
+        else:
+            print "Requested key is already active"
+    else:
+        cb.sentman.selfserve.SentmanSelfServe(NEW_KEY)
+
+except BaseException, _exc:
+    print str(_exc)
+    exit(1)
+
+exit(0)

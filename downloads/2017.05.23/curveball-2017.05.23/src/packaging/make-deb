@@ -1,0 +1,422 @@
+#!/bin/bash
+#
+# This material is based upon work supported by the Defense Advanced
+# Research Projects Agency under Contract No. N66001-11-C-4017.
+#
+# Copyright 2014 - Raytheon BBN Technologies Corp.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or
+# implied.  See the License for the specific language governing
+# permissions and limitations under the License.
+
+THISDIR=$(/usr/bin/dirname $(/usr/bin/which "$0"))
+
+SHORTNAME=curveball
+TARGETDIR=/opt/"${SHORTNAME}"
+
+BUILD_TREE_TOOL=${THISDIR}/build-tree
+DESCRIBE_BUILD_TOOL=${THISDIR}/describe-build
+SCRATCHDIR=./tmp-debbuild
+INSTALLDIR="${SCRATCHDIR}"/"${TARGETDIR}"
+DEBDIR="${SCRATCHDIR}"/DEBIAN
+BUILD_DESCRIPTION=${INSTALLDIR}/build-info.txt
+
+# logging/diagnostic functions
+script_name=$(basename "$0")
+log() { printf '%s: %s\n' "${script_name}" "$*"; }
+error() { log "ERROR: $*" >&2; }
+fatal() { error "$*"; exit 1; }
+usage_fatal() { error "$*"; usage >&2; exit 1; }
+
+# Use create-version directory; use create-version
+# to make a date-based string that makes sense for exports.
+#
+VERSION=$("${THISDIR}"/create-version)
+
+# The VERSION file must contain only the version string and nothing else.
+# VERSION=$(cat "${THISDIR}"/VERSION | head -1 | awk '{print $1}')
+# if [ $? -ne 0 ]; then
+#     fatal "Cannot access VERSION file"
+# fi
+
+ARCHITECTURE=$(dpkg --print-architecture)
+
+# remove particularly large files or directories that end up in the build,
+# but are unnecessary so they can be removed from the .deb.
+#
+# This is somewhat ad-hoc and needs to be kept up-to-date.
+
+remove_bloat() {
+
+    UNNEEDED="bbn-tools sentinels"
+
+    for bloat in ${UNNEEDED}; do
+	target="${INSTALLDIR}/${bloat}"
+	if [ -e "${target}" ]; then
+	    rm -rf "${target}"
+	fi
+    done
+
+    rm -f "${INSTALLDIR}"/scripts/*.log
+    rm -f "${INSTALLDIR}"/scripts/*.log.?
+
+    rm -f "${INSTALLDIR}"/experiments/*.log
+    rm -f "${INSTALLDIR}"/experiments/*.log.?
+
+    rm -rf "${INSTALLDIR}"/experiments/out
+
+    # Just omit all the experiments for now, since
+    # many are broken right due to changes with the
+    # bridge, etc.
+    # 2017/05/22 -DJE
+    #
+    rm -rf "${INSTALLDIR}"/experiments/
+
+    rm -rf "${INSTALLDIR}"/out
+    rm -rf "${INSTALLDIR}"/scripts/out
+    rm -rf "${INSTALLDIR}"/scripts/sdata
+
+    return 0
+}
+
+remove_nonclient() {
+
+    # Remove things that are not needed by the client.
+
+    UNNEEDED="auth/CA auth/nodes experiments sentinels"
+
+    for bloat in ${UNNEEDED}; do
+	target="${INSTALLDIR}/${bloat}"
+	if [ -e "${target}" ]; then
+	    rm -rf "${target}"
+	else
+	    log "target" ${target} "not found"
+	fi
+    done
+
+    return 0
+}
+
+add_build_info() {
+
+    "${DESCRIBE_BUILD_TOOL}" > "${INSTALLDIR}"/build-info.txt
+    return 0
+}
+
+add_docs() {
+
+    docdir="${INSTALLDIR}"/doc
+    mkdir -p "${docdir}"
+    for doc in "${THISDIR}"/../docs/*.htm ; do
+	cp "${doc}" "${docdir}"
+    done
+
+    cp "${THISDIR}/../docs/README.txt" "${docdir}"
+
+    return 0
+}
+
+old_add_click() {
+
+    # add click and our click modules
+    rm -rf "${INSTALLDIR}"/click
+    mkdir "${INSTALLDIR}"/click
+    cp "${THISDIR}"/../click/click-01102014cb.tar.gz "${INSTALLDIR}"/click
+    cp "${THISDIR}"/../click/Makefile.deb "${INSTALLDIR}"/click/Makefile
+    cp -pR "${THISDIR}"/../click/curveball "${INSTALLDIR}"/click/
+
+    # Clean out the derived files from click/curveball
+    # For some reason, distclean is not adequate.
+    #
+    (cd "${INSTALLDIR}"/click/curveball ; make distclean)
+    rm -f "${INSTALLDIR}"/click/curveball/Module.symvers
+    rm -f "${INSTALLDIR}"/click/curveball/modules.order
+    rm -rf "${INSTALLDIR}"/click/curveball/.tmp_versions
+}
+
+# Copy the installed version of the "Curveball" click from
+# /opt/curveball/click-inst to the staging area.
+#
+old_add_click_inst() {
+
+    if [ ! -d /opt/curveball/click-inst ]; then
+	fatal "Cannot find installed click in /opt/curveball"
+    fi
+
+    (cd /opt/curveball/ ; tar cf - click-inst) | \
+	    (cd "${INSTALLDIR}" ; tar xf -)
+
+    # Prune out the executables we don't need
+    for f in click-devirtualize click-pretty click-fastclassifier \
+	    click-align xml2click click-xform click-combine \
+	    click-mkmindriver click-uncombine click-flatten \
+	    click-buildtool click-compile click-mkelemmap \
+	    click2xml click-check click-elem2man click-undead ; do
+	rm -f "${INSTALLDIR}/click-inst/bin/$f"
+    done
+
+    # Prune out the static libraries we've already linked against
+    for f in libclick.a libclicktool.a ; do
+	rm -f "${INSTALLDIR}/click-inst/lib/$f"
+    done
+
+}
+
+add_click() {
+
+    # add click and our click modules
+    rm -rf "${INSTALLDIR}"/click
+    mkdir -p "${INSTALLDIR}"/click
+    cp "${THISDIR}"/../click/Makefile.deb "${INSTALLDIR}"/click/Makefile
+    cp -pR "${THISDIR}"/../click/curveball "${INSTALLDIR}"/click/
+    find "${INSTALLDIR}/click"
+
+    # Clean out the derived files from click/curveball
+    # For some reason, distclean is not adequate.
+    #
+    (cd "${INSTALLDIR}"/click/curveball ; make distclean)
+    rm -f "${INSTALLDIR}"/click/curveball/Module.symvers
+    rm -f "${INSTALLDIR}"/click/curveball/modules.order
+    rm -rf "${INSTALLDIR}"/click/curveball/.tmp_versions
+}
+
+# With fastclick, we DON'T copy the installed version of the
+# "Curveball" click to the staging area.  We need fastclick
+# to already be installed on the install host.
+#
+add_click_inst() {
+    true
+}
+
+# Add the sources for dependencies we need to build, in
+# the cases where we know what they are.
+#
+add_dep_src() {
+    mkdir -p "${INSTALLDIR}"/dependencies
+
+    # If the tarball names change, then this needs to be
+    # updated as well!
+
+    for f in README.txt netmap-20160726.tgz fastclick-20161117.tgz; do
+
+	src="${THISDIR}"/../dependencies/"${f}"
+	dst="${INSTALLDIR}"/dependencies/"${f}"
+
+	if [ ! -f "${src}" ]; then
+	    echo "Error: dep src $src is missing"
+	    exit 1
+	fi
+
+	cp "${src}" "${dst}"
+	chmod 444 "${dst}"
+    done
+}
+
+# Clean up after earlier builds
+if [ -e "${SCRATCHDIR}" ]; then
+    /bin/rm -rf "${SCRATCHDIR}"
+fi
+
+mkdir -p "${INSTALLDIR}"
+if [ ! -d "${INSTALLDIR}" ]; then
+    fatal scratch install directory could not be created
+fi
+
+builddir=$(${BUILD_TREE_TOOL} dirname)
+
+if [ ! -d "${builddir}" ]; then
+    fatal Build directory "${builddir}" does not exist
+fi
+
+(cd "${builddir}"; tar cf - .) | (cd "${INSTALLDIR}" ; tar xf -)
+
+# Remove most of the things from test/, and then copy over
+# the small subset of test/ that we want.
+rm -rf "${INSTALLDIR}/test"
+mkdir -p "${INSTALLDIR}/test"
+for app in echo-client echo-server latency throughput; do
+    cp "${builddir}/test/${app}" "${INSTALLDIR}/test/"
+done
+
+mkdir "${DEBDIR}"
+
+( cd "${SCRATCHDIR}" ;
+    find . -type f | grep -v './DEBIAN/' \
+	| xargs md5sum ) > "${DEBDIR}"/md5sums
+
+cat > "${DEBDIR}"/control << EOF
+Package: ${SHORTNAME}
+Version: ${VERSION}
+Section: base
+Priority: optional
+Architecture: ${ARCHITECTURE}
+Maintainer: Raytheon BBN Technologies
+Description: BBN Curveball release
+EOF
+
+cat "${DEBDIR}"/control
+
+cat >> "${DEBDIR}"/control << EOF
+Depends: \
+	build-essential, g++, texinfo, dante-server, openssh-server, quagga, \
+	python, python-dev, iperf, python-dumbnet, swig, libnspr4-dev, \
+	python-dpkt, python-ipaddr, python-m2crypto, libsqlite3-dev, \
+	bridge-utils, ebtables, libev-dev, \
+	libtk-img, tcl, tk, tsocks, proxychains, \
+	libnetfilter-queue1, nmap, python-pyside, \
+	zlib1g-dev, python-bitarray, python-pexpect, \
+	curl, debsums, python-tlslite, ethtool, libpcap0.8-dev, \
+	python-socksipy, python-pcapy, python-netifaces, python-dnspython, \
+	vlan
+EOF
+
+cat >> "${DEBDIR}"/postinst << EOF
+#!/bin/sh
+# post install for ${SHORTNAME} ${VERSION}
+
+PLATFORM=\$(echo "${ARCHITECTURE}-${OSTYPE}" | sed -e s/amd64/x86_64/)
+
+config_tsocks() {
+    echo 'Configuring tsocks'
+    rm -f /tmp/tsocks.conf
+    echo "server = 127.0.0.1" > /tmp/tsocks.conf
+    echo "server_type = 4" >> /tmp/tsocks.conf
+    echo "server_port = 5010" >> /tmp/tsocks.conf
+    sudo cp /tmp/tsocks.conf /etc/tsocks.conf
+}
+
+config_proxychains() {
+    echo 'Configuring proxychains'
+    rm -f /tmp/proxychains.conf
+    echo "strict_chain" > /tmp/proxychains.conf
+    echo "proxy_dns" >> /tmp/proxychains.conf
+    echo "tcp_read_time_out 15000" >> /tmp/proxychains.conf
+    echo "tcp_connect_time_out 8000" >> /tmp/proxychains.conf
+    echo "[ProxyList]" >> /tmp/proxychains.conf
+    echo "socks4 127.0.0.1 5010" >> /tmp/proxychains.conf
+    sudo cp /tmp/proxychains.conf /etc/proxychains.conf
+}
+
+if [ ! -f /lib/\${PLATFORM}/libc.so ]; then
+  sudo /bin/ln -s /lib/\${PLATFORM}/libc.so.6 /lib/\${PLATFORM}/libc.so \
+      || exit 1
+fi
+
+# This really only needs to be done on the client.
+config_tsocks
+config_proxychains
+
+case \$(hostname -f) in
+    *.nct.bbn.com)
+	echo ""
+	echo " * * * * "
+	echo "REMOVING TESTBED KEYS ON NCT HOST"
+	echo " * * * * "
+	echo ""
+	rm -f /opt/curveball/auth/keys/*
+	touch /opt/curveball/auth/keys/master.km
+	chmod 400 /opt/curveball/auth/keys/master.km
+	;;
+esac
+
+echo "= = = = = ="
+echo "RUN \"sudo apt-get install -yf\" to complete the installation"
+echo ""
+echo "= = = = = ="
+echo "DO NOT FORGET TO BUILD CLICK FOR THE DR"
+echo "= = = = = ="
+echo "If installing on the DR, then run the following commands:"
+echo "    $TARGETDIR/scripts/build-fastclick.sh # if fastclick is not installed"
+echo "    cd $TARGETDIR/click; sudo make"
+
+exit 0
+EOF
+chmod 755 "${DEBDIR}"/postinst
+
+cat >> "${DEBDIR}"/prerm << EOF
+#!/bin/sh
+# pre remove for ${SHORTNAME} ${VERSION}
+
+/bin/rm -rf "${TARGETDIR}/click/"*
+/bin/rm -rf "${TARGETDIR}/click-inst"
+/bin/rm -rf "${TARGETDIR}/scripts/"*.log "${TARGETDIR}/scripts/"*.log.?
+
+exit 0
+EOF
+chmod 755 "${DEBDIR}"/prerm
+
+make_preinst() {
+
+    BUILD_SYS=$(lsb_release -is)
+    BUILD_REL=$(lsb_release -rs)
+    BUILD_HOST="$BUILD_SYS $BUILD_REL"
+
+    cat >> "${DEBDIR}"/preinst << EOF
+#!/bin/sh
+# pre install for ${SHORTNAME} ${VERSION}
+
+MSG="ERROR: this package was compiled for $BUILD_HOST"
+if [ \$(lsb_release -is) != "$BUILD_SYS" ]; then
+    echo ""
+    echo \$MSG
+    echo ""
+    exit 1
+fi
+if [ \$(lsb_release -rs) != "$BUILD_REL" ]; then
+    echo ""
+    echo \$MSG
+    echo ""
+    exit 1
+fi
+
+exit 0
+EOF
+
+    chmod 755 "${DEBDIR}"/preinst
+}
+
+add_dep_src
+add_click
+# add_click_inst
+remove_bloat
+add_build_info
+add_docs
+make_preinst
+
+# This apparently is needed for some platforms
+#
+find "${INSTALLDIR}" -type d | xargs chmod 755
+# find "${INSTALLDIR}" -type f | xargs chmod a+r
+
+# Clean up some permissions that dpkg thinks are weird.
+find "${INSTALLDIR}/python" -type f | xargs chmod 0644
+find "${INSTALLDIR}/lib" -type f | xargs chmod 0644
+find "${INSTALLDIR}/scripts" -executable | xargs chmod 0755
+find "${INSTALLDIR}/test" -executable | xargs chmod 0755
+
+# correct any permission issues (there shouldn't be any,
+# so check first)
+
+if [ $(find "${INSTALLDIR}" -perm 0664 | wc -l) -gt 0 ]; then
+    find "${INSTALLDIR}" -perm 0664 | xargs chmod 0644
+fi
+
+if [ $(find "${INSTALLDIR}" -perm 0775 | wc -l) -gt 0 ]; then
+    find "${INSTALLDIR}" -perm 0775 | xargs chmod 0755
+fi
+
+/usr/bin/fakeroot dpkg-deb --build "${SCRATCHDIR}" || fatal dpkg-deb failed
+
+mv "${SCRATCHDIR}".deb "${SHORTNAME}_${VERSION}_${ARCHITECTURE}.deb"
+
+# FIXME: clean up after ourselves.  right now it's still handy
+# to look at the scratch dir.
+# rm -rf "${SCRATCHDIR}"

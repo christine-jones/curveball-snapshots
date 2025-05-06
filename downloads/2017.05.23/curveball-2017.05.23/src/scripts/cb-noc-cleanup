@@ -1,0 +1,199 @@
+#!/usr/bin/env python
+#
+# This material is based upon work supported by the Defense Advanced
+# Research Projects Agency under Contract No. N66001-11-C-4017.
+#
+# Copyright 2014 - Raytheon BBN Technologies Corp.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or
+# implied.  See the License for the specific language governing
+# permissions and limitations under the License.
+
+
+"""
+For each directory given on the commandline, removes sentinel files and Bloom
+filter files that are out of date (either because their valid time for use is
+more than one hour in the past, or because they've been superseded by a new
+version that is valid or will become valid in the future).
+
+Directories that don't exist are skipped.  Errors are reported, but do not
+halt the program.
+
+It's a good idea to run this semi-regularly because otherwise the directories
+used for these files will grow without bound.
+"""
+
+import datetime
+import os
+import re
+import sys
+import time
+
+# The directory that this executable lives in.
+#
+DIRNAME = os.path.normpath(
+        os.path.abspath(os.path.dirname(sys.argv[0]) or '.'))
+
+sys.path.append(os.path.normpath(os.path.join(DIRNAME, '..', 'python')))
+
+import cb.noc.file
+import cb.util.platform
+
+# TODO: this only runs on "NOC"-capable nodes: no support for
+# Windows or Android.  Right now, only Ubuntu 12.04 is supported.
+
+# Because of permissions issues (see ticket:782) it is currently
+# necessary to run this app as the same user each time, and some
+# options require root, we always require it to be run as root
+# (or via sudo).
+#
+#if os.geteuid() != 0:
+#    print 'ERROR: %s must be run as root or via sudo' % sys.argv[0]
+#    sys.exit(1)
+
+def main(argv):
+    """
+    Loop over all the directories given in argv, deleting "old" files
+    in each directory.
+    """
+
+    for directory in argv[1:]:
+        if not os.path.isdir(directory):
+            print 'Skipping [%s]' % directory
+            continue
+
+        print 'Cleaning [%s]' % directory
+
+        delete_outdated(directory)
+        delete_superseded(directory)
+
+def delete_outdated(directory):
+    """
+    Delete any files in the given directory that match the
+    sbf or sent filename format, and are obviously outdated
+    (more than an hour out-of-date).
+    """
+
+    # because these files currently are good for an hour, "last hour's"
+    # file may labeled with a timestamp as much as two hours ago
+    #
+    hour_old = int(time.time()) - (2 * 60 * 60)
+    utc_hour_old = datetime.datetime.utcfromtimestamp(hour_old)
+
+    old_sent_fname = cb.noc.file.sentinel_fname(utc=utc_hour_old)
+    old_bf_fname = cb.noc.file.sentinel_bf_name(utc=utc_hour_old)
+    old_dhexp_fname = cb.noc.file.dhexp_fname(utc=utc_hour_old)
+
+    # First, remove up any files whose validity is in the past.
+    #
+    fnames = []
+    try:
+        for _root, _dirs, fnames in os.walk(directory):
+            break
+    except BaseException, exc:
+        print 'Error: %s' % str(exc)
+
+    for fname in fnames:
+        if re.match(cb.noc.file.SENTINEL_RE, fname):
+            if fname < old_sent_fname:
+                path = os.path.join(directory, fname)
+                print 'Deleting %s' % path
+                try:
+                    os.unlink(path)
+                except BaseException, exc:
+                    print 'Error: %s' % str(exc)
+
+        elif re.match(cb.noc.file.SENTINEL_BF_RE, fname):
+            if fname < old_bf_fname:
+                path = os.path.join(directory, fname)
+                print 'Deleting %s' % path
+                try:
+                    os.unlink(path)
+                except BaseException, exc:
+                    print 'Error: %s' % str(exc)
+
+        elif re.match(cb.noc.file.DHEXP_RE, fname):
+            if fname < old_dhexp_fname:
+                path = os.path.join(directory, fname)
+                print 'Deleting %s' % path
+                try:
+                    os.unlink(path)
+                except BaseException, exc:
+                    print 'Error: %s' % str(exc)
+
+def delete_superseded(directory):
+    """
+    Delete any sbf files in the given directory that have been
+    superseded by sbf files with the same valid period but a
+    later generation number.
+    """
+
+    # Next, remove SBF files that have been superseded.
+    # (we leave an extra generation or two just in case)
+    #
+    fnames = []
+    try:
+        for _root, _dirs, fnames in os.walk(directory):
+            break
+    except BaseException, exc:
+        print 'Error: %s' % str(exc)
+
+    sbf_fnames = [fname for fname in fnames
+            if re.match(cb.noc.file.SENTINEL_BF_RE, fname)]
+
+    # Group the remaining sbf names by hour, and then
+    # remove all but the last two for each hour.
+    #
+    # FIXME: this is a hack that depends on code in
+    # cb.noc.file.
+
+    by_time = dict()
+
+    for fname in sbf_fnames:
+        components = fname.split('-')
+        dstr = '-'.join(components[0:3])
+        # print '%s %s' % (fname, dstr)
+
+        if not dstr in by_time:
+            by_time[dstr] = list([fname])
+        else:
+            by_time[dstr].append(fname)
+
+    for dstr in sorted(by_time.keys()):
+        # print dstr
+        # print by_time[dstr]
+        oldies = sorted(by_time[dstr])[:-2]
+        for oldie in oldies:
+            path = os.path.join(directory, oldie)
+            print 'Deleting %s' % path
+            try:
+                os.unlink(path)
+            except BaseException, exc:
+                print 'Error: %s' % str(exc)
+
+    # Now repeat the process, but for .bdh files
+    #
+    bdh_fnames = [fname for fname in fnames
+            if re.match(cb.noc.file.BDH_RE, fname)]
+    bdh_fnames = sorted(bdh_fnames)
+
+    for fname in bdh_fnames[:-2]:
+        path = os.path.join(directory, fname)
+        print 'Deleting %s' % path
+        try:
+            os.unlink(path)
+        except BaseException, exc:
+            print 'Error: %s' % str(exc)
+
+
+
+if __name__ == '__main__':
+    exit(main(sys.argv))

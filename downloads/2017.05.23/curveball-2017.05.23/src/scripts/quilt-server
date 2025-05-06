@@ -1,0 +1,245 @@
+#!/usr/bin/env python
+#
+# This material is based upon work supported by the Defense Advanced
+# Research Projects Agency under Contract No. N66001-11-C-4017.
+#
+# Copyright 2014 - Raytheon BBN Technologies Corp.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or
+# implied.  See the License for the specific language governing
+# permissions and limitations under the License.
+
+
+"""
+Quilt server.
+
+The quilt-server listens on a port for incoming quilt-client connections
+(which are usually tunneled through Curveball, but the quilt-server is
+oblivious to this, and interprets the connections as client CCP streams,
+which are interpreted as normal Curveball CCP streams.
+
+There is an option to disable CCP processing, in which case the server
+connects to whatever service is at the ccp_port and passes the incoming
+and outgoing data to that service uninterpreted.
+"""
+
+import logging
+import os
+import sys
+
+# The directory that this executable lives in.
+#
+DIRNAME = os.path.normpath(
+        os.path.abspath(os.path.dirname(sys.argv[0]) or '.'))
+
+sys.path.append(os.path.normpath(os.path.join(DIRNAME, '..', 'python')))
+
+import cb.util.unbuffered
+cb.util.unbuffered.unbuffer()
+
+from twisted.internet import reactor
+from twisted.internet.task import LoopingCall
+
+from optparse import OptionParser
+
+from qe2.core.log import Qe2Logger
+from qe2.core.log import QE2LOG
+from qe2.core.params import Qe2Params
+from qe2.core.server import Qe2Server
+from qe2.core.server import Qe2ServerListener
+
+import cb.util.danted_setup
+
+from cb.ccp.ccp_dp import CCP_DP
+from cb.util.config import read_config
+from cb.vpn.server import VpnServer    
+
+Qe2Logger.init_logger(loggername='cb')
+
+SOCKS_PORT = 1080
+QUILT_PORT = 5002
+CCP_PORT = 5010
+
+def parse_args():
+    """
+    Parse the commandline and check the parameters for validity
+    """
+
+    parser = OptionParser('Usage: %prog [options]')
+
+    parser.add_option('--no-ccp',
+            dest='provide_ccp', default=True,
+            action='store_false',
+            help='Do not interpret CCP messages')
+
+    parser.add_option('-c', '--ccp-port',
+            dest='ccp_port', default=CCP_PORT,
+            metavar='PORTNUM',
+            help='Internal port CCP connections [%default]')
+
+    # The quilt-server currently uses the same parameters as
+    # cb-dp, which means that they can't be run on the
+    # same host.
+    #
+    default_config = os.path.normpath(
+            os.path.join(DIRNAME, 'decoyproxy.conf'))
+
+    parser.add_option("--configfile", dest="config_file",
+            default=default_config,
+            help="Quilt server configuration file [%default]",
+            metavar="FILENAME")
+
+    # Could use more sanity checks on the port numbers
+
+    parser.add_option('-l', '--logging-level',
+            dest='logging_level', default=3, type=int,
+            help='Logging level: 1-5, or 0 for no logging [%default]')
+
+    parser.add_option("--outbound-dev", dest="outbound_dev",
+            default=None,
+            help="Specify the outbound VPN interface dev",
+            metavar="devicename")
+
+    parser.add_option('-p', '--quilt-port',
+            dest='quilt_port', default=QUILT_PORT,
+            metavar='PORTNUM', type=int,
+            help='Local port for incoming quilt connections [%default]')
+
+    parser.add_option('-s', '--socks-port',
+            dest='socks_port', default=SOCKS_PORT,
+            metavar='PORTNUM', type=int,
+            help='Port on which the local SOCKS server listens [%default]')
+
+    permitted_subnet = '10.0.0.0/8'
+    parser.add_option('--permitted-subnet', default=permitted_subnet,
+            metavar='IPv4-CIDR',
+            help='Specify the subnet that is permitted for proxying ' +
+                    '[%default]')
+
+    (options, args) = parser.parse_args(sys.argv)
+    if len(args) > 1:
+        print 'ERROR: incorrect usage'
+        parser.print_help()
+        sys.exit(1)
+
+    # truncate silly logging levels
+    #
+    if options.logging_level < 0:
+        options.logging_level = 0
+    elif options.logging_level > 5:
+        options.logging_level = 5
+
+    # set the logging levels for 'cb' (used by Curveball) and 'qe2'
+    # (used by the quilting modules)
+    #
+    logging.getLogger('cb').setLevel(10 * options.logging_level)
+    logging.getLogger('qe2').setLevel(10 * options.logging_level)
+
+    # QuiltClientState.ccp_proxy_port = options.ccp_port
+
+    return options
+
+def start_cvpnd(config):
+    """
+    Start up the CVPN, based on the parameters in the config file.
+
+    NOTE: there's no way to NOT enable the VPN (just like there's no
+    way to NOT enable the SOCKS proxy).  There should be.
+    """
+
+    if 'cvpnd' in config:
+        cvpnd_config = config['cvpnd']
+
+        try:
+            cvpndhost, cvpndport = cvpnd_config['service_addr'].split(':')
+            cvpndport = int(cvpndport)
+
+            tun_subnet = cvpnd_config['tun_subnet']
+            outbound_dev = cvpnd_config['outbound_dev']
+            nameservers = cvpnd_config['nameservers']
+        except KeyError, exc:
+            print 'Missing parameter (%s)' % (str(exc),)
+            return None
+
+        # If we're doing cvpnd, then we need to enable forwarding.
+        #
+        os.system('/usr/bin/sudo /sbin/sysctl net.ipv4.ip_forward=1')
+
+        _vpnd = VpnServer(cvpndport, tun_subnet, outbound_dev, nameservers)
+
+        return (cvpndhost, cvpndport)
+
+    else:
+        print 'No configuration for cvpnd; not starting VPN'
+        return None
+
+def quilt_server_main(options):
+    """
+    Run the quilt server
+    """
+
+    config = read_config(options.config_file)
+
+    provide_ccp = options.provide_ccp
+    quilt_port = options.quilt_port
+    socks_port = options.socks_port
+
+    print "Configuring danted"
+
+    try:
+        cb.util.danted_setup.danted_setup(
+                options.permitted_subnet, socks_port)
+    except BaseException, exc:
+        print 'ERROR: %s' % str(exc)
+        exit(1)
+
+    # Start the cvpnd, if configured to do so.
+    #
+    # FIXME: gross hack to override the outbound_dev
+    # See cb-dp for analogous hack.
+    #
+    if options.outbound_dev:
+        config['cvpnd']['outbound_dev'] = options.outbound_dev
+        print "new outbound device %s" % options.outbound_dev
+
+    cvpn_addr = start_cvpnd(config)
+
+    if provide_ccp:
+        proxy_addr = ('', SOCKS_PORT) # the local SOCKS server to use
+
+        print '%s: starting SOCKS-over-CCP_DP service' % sys.argv[0]
+
+        _ccp_dp = CCP_DP(('', options.ccp_port),
+                proxy_addr,
+                False, None, {},
+                cvpn_addr=cvpn_addr)
+
+    # The parameters for connecting to the CCP_DP server
+    #
+    Qe2Params.set('SERVER_APP_HOST', '')
+    Qe2Params.set('SERVER_APP_PORT', CCP_PORT)
+
+    listener = Qe2ServerListener('', QUILT_PORT)
+
+    reactor.run()
+
+if __name__ == '__main__':
+    def main():
+        try:
+            quilt_server_main(parse_args())
+        except BaseException, exc:
+            print exc
+        finally:
+            print 'quilt-server exiting.'
+
+    main()
+
+

@@ -1,0 +1,210 @@
+#!/usr/bin/env python
+#
+# This material is based upon work supported by the Defense Advanced
+# Research Projects Agency under Contract No. N66001-11-C-4017.
+#
+# Copyright 2014 - Raytheon BBN Technologies Corp.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or
+# implied.  See the License for the specific language governing
+# permissions and limitations under the License.
+
+
+"""
+Filter the "human-readable" version of the Decoy Host Blacklist
+down into the form expected by the DR.
+
+Very simple; intended to be used as a pipe without any commandline
+parameters.
+
+WARNING: socket.getaddrinfo() can return gibberish for bad inputs.
+For example, asking for the resolution of '10.10' results in '10.0.0.10'
+via some weird expansion.  Therefore some bogus values can get converted
+to non-bogus but incorrect values. TODO: fix this.
+
+WARNING: using treating hostnames like subnets can result in some
+strange behavior when you treat a /32 address like a prefix.  Don't do
+this unless you know what you're doing.  The program will not detect
+some very bogus things.  TODO: fix this
+"""
+
+import ipaddr
+import re
+import socket
+import sys
+
+# I'm not sure all of these are valid, but it's pretty close.
+#
+VALID_NETMASKS = [
+        '0.0.0.0',
+        '128.0.0.0',
+        '192.0.0.0',
+        '224.0.0.0',
+        '240.0.0.0',
+        '248.0.0.0',
+        '252.0.0.0',
+        '254.0.0.0',
+        '255.0.0.0',
+        '255.128.0.0',
+        '255.192.0.0',
+        '255.224.0.0',
+        '255.240.0.0',
+        '255.248.0.0',
+        '255.252.0.0',
+        '255.254.0.0',
+        '255.255.0.0',
+        '255.255.128.0',
+        '255.255.192.0',
+        '255.255.224.0',
+        '255.255.240.0',
+        '255.255.248.0',
+        '255.255.252.0',
+        '255.255.254.0',
+        '255.255.255.0',
+        '255.255.255.128',
+        '255.255.255.192',
+        '255.255.255.224',
+        '255.255.255.240',
+        '255.255.255.248',
+        '255.255.255.252',
+        '255.255.255.254',
+        '255.255.255.255'
+    ]
+
+def process_lines(in_lines):
+    """
+    Process each line in the input; strip out comments and blanklines,
+    and then try to convert to ipaddress and netmask.
+    """
+
+    out_lines = list()
+
+    line_num = 0
+    for orig_line in in_lines:
+        orig_line = orig_line.rstrip()
+        line_num += 1
+
+        line = orig_line.strip()
+        line = re.sub('\s*#.*', '', line)
+
+        # if there is nothing left after stripping out the comments
+        # and whitespace, then just move on to the next line
+        #
+        if not line:
+            continue
+
+        components = line.split()
+        hostname = components[0]
+        if len(components) > 1:
+            netmask = components[1]
+        elif re.search('/', hostname):
+            # Look for a maskwidth instead of a netmask.
+            # If we find one, convert it to a netmask.
+            try:
+                (hostname, maskwidth_str) = hostname.split('/')
+
+                maskwidth = int(maskwidth_str)
+                assert (maskwidth >= 0) and (maskwidth <= 32)
+
+                netmask = VALID_NETMASKS[maskwidth]
+            except BaseException:
+                print 'Error on line %d [%s]' % (line_num, orig_line)
+                raise ValueError('Invalid host or netmask specification')
+        else:
+            netmask = '255.255.255.255'
+
+        if not netmask in VALID_NETMASKS:
+            print 'Error on line %d [%s]' % (line_num, orig_line)
+            raise ValueError('Invalid host or netmask specification')
+
+        addrs = []
+        try:
+            addrs = socket.getaddrinfo(hostname, None, socket.AF_INET,
+                    socket.SOCK_STREAM, socket.SOL_TCP)
+
+            # Can getaddrinfo succeed but return no addresses?
+            # Better safe than sorry.
+            #
+            if len(addrs) == 0:
+                raise ValueError('no addr found for [%s]' % hostname)
+
+        except BaseException:
+            print 'Error on line %d [%s]' % (line_num, orig_line)
+            raise ValueError('Unknown hostname [%s]' % hostname)
+
+        for addr in addrs:
+            ipnum = addr[4][0] # depends on the getaddrinfo return format
+
+            try:
+                addr_obj = ipaddr.IPv4Network(
+                        '%s/%d' % (ipnum, VALID_NETMASKS.index(netmask)))
+                out_lines.append('%-15s %s\n' %
+                        (str(addr_obj.ip), str(addr_obj.netmask)))
+
+            except BaseException:
+                print 'Error on line %d [%s]' % (line_num, orig_line)
+                raise ValueError('Bad address or netmask')
+
+    return out_lines
+
+def main(argv):
+    """
+    Parse argv, read the input, process it, and write out the result.
+
+    If the input fname is '-', then use stdin.
+    If the output fname is '-', then use stdout.
+    """
+
+    if len(argv) != 3:
+        print 'ERROR: usage %s infile outfile' % argv[0]
+        sys.exit(1)
+
+    in_fname = argv[1]
+    out_fname = argv[2]
+
+    # TODO: normalize the paths and make sure that they're not the same.
+    # It's generally a bad idea to overwrite your input
+
+    if in_fname == '-':
+        fin = sys.stdin
+    else:
+        try:
+            fin = open(in_fname, 'r')
+        except BaseException, exc:
+            print 'ERROR: %s: %s' % (argv[0], str(exc))
+            sys.exit(1)
+
+    in_lines = fin.readlines()
+    if fin != sys.stdin:
+        fin.close()
+
+    try:
+        out_lines = process_lines(in_lines)
+    except ValueError, exc:
+        print 'ERROR: %s: %s' % (argv[0], str(exc))
+        sys.exit(1)
+
+    if out_fname == '-':
+        fout = sys.stdout
+    else:
+        try:
+            fout = open(out_fname, 'w+')
+        except BaseException, exc:
+            print 'ERROR: %s: %s' % (argv[0], str(exc))
+            sys.exit(1)
+
+    fout.write(''.join(out_lines))
+    if fout != sys.stdout:
+        fout.close()
+
+if __name__ == '__main__':
+    exit(main(sys.argv))
+

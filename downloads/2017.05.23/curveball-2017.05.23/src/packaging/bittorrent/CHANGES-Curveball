@@ -1,0 +1,118 @@
+1. Delete files that are created/modified by autogen/configure script
+
+src/transmission/Makefile.in
+src/transmission/aclocal.m4
+src/transmission/cli/Makefile.in
+src/transmission/config.guess
+src/transmission/config.sub
+src/transmission/configure
+src/transmission/daemon/Makefile.in
+src/transmission/depcomp
+src/transmission/extras/Makefile.in
+src/transmission/gtk/Makefile.in
+src/transmission/gtk/icons/Makefile.in
+src/transmission/libtransmission/Makefile.in
+src/transmission/libtransmission/version.h
+src/transmission/ltmain.sh
+src/transmission/m4/libtool.m4
+src/transmission/macosx/Makefile.in
+src/transmission/third-party/Makefile.in
+src/transmission/third-party/dht/Makefile.in
+src/transmission/third-party/libnatpmp/Makefile.in
+src/transmission/third-party/libutp/Makefile.in
+src/transmission/third-party/miniupnp/Makefile.in
+src/transmission/utils/Makefile.in
+src/transmission/web/Makefile.in
+src/transmission/web/images/Makefile.in
+src/transmission/web/javascript/Makefile.in
+src/transmission/web/javascript/jquery/Makefile.in
+src/transmission/web/style/Makefile.in
+src/transmission/web/style/jqueryui/Makefile.in
+src/transmission/web/style/jqueryui/images/Makefile.in
+src/transmission/web/style/transmission/Makefile.in
+src/transmission/web/style/transmission/images/Makefile.in
+src/transmission/web/style/transmission/images/buttons/Makefile.in
+
+2. Make 6881 the default bittorrent peer-port
+
+src/transmission/cli/transmission-cli.1
+src/transmission/daemon/transmission-daemon.1
+src/transmission/libtransmission/transmission.h
+src/transmission/macosx/Defaults.plist
+
+3. Embed encryption input into transmission handshake
+
+   ff --ei option is passed using the transmission CL input.
+   --ei option requires encryption just like --er.
+
+   Add #ifdef preprocessor for ENCRYPTION_INPUT option
+    
+   There are some debug "printf"s, which may be pruned
+   later or not, since not passing "--log-debug" option
+   to transmission-daemon will turn off all "printf"s.
+    
+   The --ei option support for transmission-remote is
+   included as well.
+
+src/transmission/daemon/daemon.c
+src/transmission/daemon/transmission-daemon.1
+src/transmission/daemon/remote.c
+src/transmission/libtransmission/crypto-test.c
+src/transmission/libtransmission/crypto.c
+src/transmission/libtransmission/crypto.h
+src/transmission/libtransmission/handshake.c
+src/transmission/libtransmission/quark.c
+src/transmission/libtransmission/quark.h
+src/transmission/libtransmission/rpc-test.c
+src/transmission/libtransmission/rpcimpl.c
+src/transmission/libtransmission/session.c
+src/transmission/libtransmission/session.h
+src/transmission/libtransmission/transmission.h
+
+4. Enable option to feed key input via transmission-daemon (command line).
+
+src/transmission/daemon/daemon.c
+src/transmission/daemon/remote.c
+src/transmission/daemon/transmission-daemon.1
+src/transmission/daemon/transmission-remote.1
+src/transmission/libtransmission/handshake.c
+src/transmission/libtransmission/quark.c
+src/transmission/libtransmission/quark.h
+src/transmission/libtransmission/rpc-test.c
+src/transmission/libtransmission/rpcimpl.c
+src/transmission/libtransmission/session.c
+src/transmission/libtransmission/session.h
+src/transmission/libtransmission/transmission.h
+
+5. Add check that when encryption input is not NULL, ensure
+   that the length is 2 * KEY_LEN (=192).
+ 
+   Check if the encryption-input is all hex-str.
+
+src/transmission/libtransmission/crypto.c
+src/transmission/libtransmission/handshake.c
+
+6. Add InfoHash in the last 20 bytes of PadA
+
+   Iff the len(PadA) is greater than len(InfoHash).
+
+src/transmission/libtransmission/handshake.c
+
+7. README on how to build/install transmission with changes we made.
+
+    It details how to install dependencies (assuming one has
+    access to a canonical repo or the Internet). Then it
+    describes how to configure transmission with the changes
+    we made, and finally tells you how to build/install
+    transmission from checked-in 2.84 transmission src.
+
+src/packaging/bittorrent/README-EncryptionInput
+
+
+
+
+
+
+
+
+

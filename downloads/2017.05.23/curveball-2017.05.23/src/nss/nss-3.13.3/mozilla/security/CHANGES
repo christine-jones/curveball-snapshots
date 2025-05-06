@@ -1,0 +1,125 @@
+
+CHANGES
+
+Changes are relative to NSS-3.13.3
+
+Changes are Copyright Raytheon BBN Technologies Corp. 2011-2014.
+
+ADDED FILES:
+
+    New files (any files or directories within this directory or subdirectory
+    that were not present in NSS-3.13.3) are copyrighted by Raytheon BBN
+    Technologies and licensed with the Apache 2.0 license.  These include the
+    following files or directories:
+
+    nss/Doxyfile
+    nss/cmd/dmtest/
+    nss/cmd/stencil/
+    nss/lib/curveball/
+    nss/lib/freebl/curveball_rijndael.c
+    nss/lib/freebl/curveball_rijndael.h
+    nss/lib/ssl/cbchooser.c
+    nss/lib/ssl/cbchooser.h
+    nss/lib/ssl/curveball.c
+    nss/lib/ssl/curveball_config.c
+    nss/lib/ssl/curveball_keydata.h
+    nss/lib/ssl/curveball_nss.h
+    nss/lib/ssl/curveball_premaster.h
+    nss/lib/ssl/curveball_public.h
+    nss/lib/ssl/curveball_ssl.c
+    nss/lib/ssl/curveball_ssl.h
+
+EDITED FILES:
+
+coreconf/Darwin.mk - 2013-05-21
+    Updated to be build on more recent versions of Darwin/MacOSX (10.8)
+
+nss/cmd/Makefile - 2013-05-21
+
+    Updated to be build on more recent versions of Darwin/MacOSX (10.8)
+
+nss/Makefile - 2012-08-30
+
+    Added rules for building etags and xref files to simplify code browsing
+
+nss/cmd/digest/digest.c - 2012-08-30
+
+    Added comments.  Most changes were unintentional reformatting.
+
+nss/lib/freebl/ldvector.c - 2014-04-04
+
+    Added BBN Curveball functions to the ldvector array.
+
+nss/lib/freebl/loader.c, nss/lib/freebl/loader.h - 2014-04-28
+
+    Added stub functions for BBN Curveball functions to the loader.
+
+nss/lib/freebl/manifest.mn - 2014-04-03
+
+    Added curveball_rijndael.c and curveball_rijndael.h to the manifest.
+
+nss/lib/freebl/rijndael.c - 2014-04-04
+
+    Add diagnostics and calls to the curveball_rijndael functions.
+
+Edited: nss/lib/manifest.mn - 2014-04-01
+
+    Add "curveball" to the list of directories to build, and reorder the
+    list of directories so that "base" is built first.
+
+nss/lib/softoken/pkcs11c.c - 2013-05-06
+
+    Modify how the SSL PremasterSecret is chosen to use the Curveball protocol
+    if the connection is using the Curveball protocol.
+
+nss/lib/softoken/rsawrapr.c - 2013-09-24
+
+    If using Curveball, then when encrypting the SSL PremasterSecret (or
+    anything else that is exactly the same length) then do not use random
+    padding.  Use a deterministic pad, according to the Curveball protocol.
+
+nss/lib/ssl/config.mk - 2012-05-31
+
+    Add dependency on nssb, which is needed by Curveball functions.
+
+nss/lib/ssl/manifest.mn - 2014-04-03
+
+    Added the curveball header files to EXPORTS, and the Curveball C source
+    files to CSRCS.  Also added sslimpl.h and ssl3prot.h to EXPORTS, because
+    these are referenced by files in other libraries.
+
+nss/lib/ssl/ssl.def - 2013-04-13
+
+    Added Curveball global variables.
+
+nss/lib/ssl/ssl3con.c - 2014-06-07
+
+    Implement the BBN Curveball protocol.
+
+    For testing purposes, limit the ciphersuites to those that the BBN
+    Curveball implementation currently supports.
+
+nss/lib/ssl/ssl3ecc.c - 2013-09-27
+
+    Handle the case where most ciphersuites are disabled (see
+    nss/lib/ssl/ssl3con.c).
+
+nss/lib/ssl/sslimpl.h - 2014-06-07
+
+    Add Curveball fields to ssl3StateStr; add declarations for Curveball
+    functions.
+
+nss/lib/ssl/sslsecur.c - 2014-04-04
+
+    Clear Curveball flags on the socket, if any.  The presence of Curveball
+    flags on an open socket, after the handshake, causes some non-Curveball
+    functions to break because these functions don't know how to interpret
+    these flags.
+
+nss/lib/ssl/sslsock.c - 2012-06-08
+
+    Initialize the Curveball fields in each new sslsock.
+
+nss/lib/util/secerr.h - 2012-05-31
+
+    Add error code for Curveball errors.

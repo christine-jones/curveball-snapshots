@@ -1,0 +1,292 @@
+#!/bin/sh
+#
+# This material is based upon work supported by the Defense Advanced
+# Research Projects Agency under Contract No. N66001-11-C-4017.
+#
+# Copyright 2014 - Raytheon BBN Technologies Corp.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or
+# implied.  See the License for the specific language governing
+# permissions and limitations under the License.
+
+# In conjunction with "null-latency", this program measures the
+# latency of initiating connections (SOCKS or normal) and sending
+# a message and getting a response (TtFB - time to first byte) and
+# the latency of established connections (RTT - the time to receive
+# a response to a short message) with and without Curveball with
+# both http and https tunnels.
+#
+# To set up, start the echo-server listening on $ECHOPORT
+# on the $COVERT host, with no filter rules preventing
+# connections from this host to $COVERT on $ECHOPORT.
+# The echo-server should be run in quiet mode in order to
+# keep the overhead of its chatter from skewing the results.
+#
+# Note: the TtFB measurement is probably higher than it needs
+# to be because echo-client has a non-trivial startup cost.
+# It would be more accurate to add an option to echo-client to
+# open/close multiple connections rather than one per iteraction.
+
+DIRNAME=$(/usr/bin/dirname $(/usr/bin/which "$0"))
+SCRIPTDIR=$(/usr/bin/dirname $(/usr/bin/which "$0"))"/../scripts"
+EXPNAME=$(/bin/hostname | /bin/sed -e 's/^[^.]*\.//' -e 's/\..*//')
+
+DECOY=decoy
+
+# If we're running in a pico experiment, then there's no covert,
+# so use decoy as the target.
+#
+case ${EXPNAME} in
+    cb-pico|cb-pico2)
+	echo "Warning: running in a pico experiment."
+	echo "Warning: the results may be not be accurate."
+	COVERT=decoy
+	;;
+    *)
+	COVERT=covert
+	;;
+esac
+
+ITERS=1000
+ECHOPORT=2300
+
+# By default, on EARS there is an http_proxy set so that things
+# like apt-get will work.  We need to disable this before curl
+# tries to use it.
+#
+unset http_proxy
+
+CLIENT=curveball-client
+CLIENTPATH="${SCRIPTDIR}/${CLIENT}"
+ECHOCLIENT="${DIRNAME}/echo-client"
+
+SUDO=/usr/bin/sudo
+PKILL=/usr/bin/pkill
+
+NC=/bin/nc
+
+usage() {
+    cat <<.
+
+    $0: run a latency test for the given tunnel
+
+    Each test specified on the commandline is run once.
+    Tests may be specified by test number or name.
+
+    Num Name               Description
+
+    0  all                 Run all of the test conditions
+    1  normal              Ordinary (tcp)
+    2  curveball-http      Curveball http
+    3  curveball-https     Curveball https
+    4  curveball-http-uni  Curveball http-uni
+    5  curveball-tls-uni   Curveball tls-uni
+
+.
+}
+
+if [ $# -eq 0 ]; then
+    usage
+    exit 1
+fi
+
+DO_NORMAL=0
+DO_CURVEBALL_HTTP=0
+DO_CURVEBALL_HTTPS=0
+DO_CURVEBALL_HTTP_UNI=0
+DO_CURVEBALL_TLS_UNI=0
+
+for testcase in $* ; do
+    case "$testcase" in
+	1|normal)
+	    DO_NORMAL=1
+	    ;;
+	2|curveball-http)
+	    DO_CURVEBALL_HTTP=1
+	    ;;
+	3|curveball-https)
+	    DO_CURVEBALL_HTTPS=1
+	    ;;
+	4|curveball-http-uni)
+	    DO_CURVEBALL_HTTP_UNI=1
+	    ;;
+	5|curveball-tls-uni)
+	    DO_CURVEBALL_TLS_UNI=1
+	    ;;
+	0|all)
+	    DO_NORMAL=1
+	    DO_CURVEBALL_HTTP=1
+	    DO_CURVEBALL_HTTPS=1
+	    DO_CURVEBALL_HTTP_UNI=1
+	    DO_CURVEBALL_TLS_UNI=1
+	    ;;
+	-h|help)
+	    usage
+	    exit 0
+	    ;;
+	*)
+	    echo "$0: Error: Unknown test condition $testcase"
+	    usage
+	    exit 1
+	    ;;
+    esac
+done
+
+
+if [ 0 -ne ${DO_NORMAL} ]; then
+    NITERS=$ITERS
+
+    CNT=0
+    STARTTIME=$(/bin/date +"%s.%N")
+    while [ $CNT -lt $NITERS ]; do
+	CNT=$((CNT + 1))
+	echo 'hi' | ${ECHOCLIENT} ${COVERT} ${ECHOPORT} > /dev/null
+    done
+    ENDTIME=$(/bin/date +"%s.%N")
+
+    RTT=$(echo "($ENDTIME - $STARTTIME) / $NITERS" | bc -l)
+    echo "normal echo TtFB $RTT"
+
+    STARTTIME=$(/bin/date +"%s.%N")
+    echo 'hi' | ${ECHOCLIENT} -n ${NITERS} -q ${COVERT} ${ECHOPORT}
+    ENDTIME=$(/bin/date +"%s.%N")
+
+    RTT=$(echo "($ENDTIME - $STARTTIME) / $NITERS" | bc -l)
+    echo "normal echo RTT $RTT"
+fi
+
+if [ 0 -ne ${DO_CURVEBALL_HTTP} ]; then
+    # Kill the Curveball client (if any) and restart in HTTP mode
+    #
+    ${SUDO} ${PKILL} -f ${CLIENT}
+    ${SUDO} ${CLIENTPATH} -x -d "${DECOY}:80" -w 2> /dev/null &
+    sleep 5
+
+    NITERS=$ITERS
+
+    CNT=0
+    STARTTIME=$(/bin/date +"%s.%N")
+    while [ $CNT -lt $NITERS ]; do
+	CNT=$((CNT + 1))
+	echo 'hi' | ${ECHOCLIENT} -x localhost:5010 ${COVERT} ${ECHOPORT} > /dev/null
+    done
+    ENDTIME=$(/bin/date +"%s.%N")
+
+    RTT=$(echo "($ENDTIME - $STARTTIME) / $NITERS" | bc -l)
+    echo "curveball-http echo TtFB $RTT"
+
+    STARTTIME=$(/bin/date +"%s.%N")
+    echo 'hi' | ${ECHOCLIENT} -x localhost:5010 -n ${NITERS} -q ${COVERT} ${ECHOPORT}
+    ENDTIME=$(/bin/date +"%s.%N")
+
+    RTT=$(echo "($ENDTIME - $STARTTIME) / $NITERS" | bc -l)
+    echo "curveball-http echo RTT $RTT"
+fi
+
+if [ 0 -ne ${DO_CURVEBALL_HTTPS} ]; then
+    # Kill the Curveball client (if any) and restart in HTTPS mode
+    #
+    ${SUDO} ${PKILL} -f ${CLIENT}
+    ${SUDO} ${CLIENTPATH} -x -d "${DECOY}:443" 2> /dev/null &
+    sleep 5
+
+    NITERS=$ITERS
+
+    CNT=0
+    STARTTIME=$(/bin/date +"%s.%N")
+    while [ $CNT -lt $NITERS ]; do
+	CNT=$((CNT + 1))
+	echo 'hi' | ${ECHOCLIENT} -x localhost:5010 ${COVERT} ${ECHOPORT} > /dev/null
+    done
+    ENDTIME=$(/bin/date +"%s.%N")
+
+    RTT=$(echo "($ENDTIME - $STARTTIME) / $NITERS" | bc -l)
+    echo "curveball-https echo TtFB $RTT"
+
+    STARTTIME=$(/bin/date +"%s.%N")
+    echo 'hi' | ${ECHOCLIENT} -x localhost:5010 -n ${NITERS} -q ${COVERT} ${ECHOPORT}
+    ENDTIME=$(/bin/date +"%s.%N")
+
+    RTT=$(echo "($ENDTIME - $STARTTIME) / $NITERS" | bc -l)
+    echo "curveball-https echo RTT $RTT"
+fi
+
+if [ 0 -ne ${DO_CURVEBALL_HTTP_UNI} ]; then
+    # Kill the Curveball client (if any) and restart in HTTP-UNI mode
+    #
+    # TODO: fix so that this reliably works.  Right now the messages are
+    # too small to push through the system!
+    #
+    ${SUDO} ${PKILL} -f ${CLIENT}
+    ${SUDO} ${CLIENTPATH} -x -d "${DECOY}:80" -w -u 2> /dev/null &
+    sleep 5
+
+    # Use a very small number of iterations for HTTP-UNI because the
+    # latency is very large.
+    #
+    NITERS=50
+
+    CNT=0
+    STARTTIME=$(/bin/date +"%s.%N")
+    while [ $CNT -lt $NITERS ]; do
+	CNT=$((CNT + 1))
+	echo 'hi' | ${ECHOCLIENT} -x localhost:5010 ${COVERT} ${ECHOPORT} > /dev/null
+    done
+    ENDTIME=$(/bin/date +"%s.%N")
+
+    RTT=$(echo "($ENDTIME - $STARTTIME) / $NITERS" | bc -l)
+    echo "curveball-http-uni echo TtFB $RTT"
+
+    STARTTIME=$(/bin/date +"%s.%N")
+    echo 'hi' | ${ECHOCLIENT} -x localhost:5010 -n ${NITERS} -q ${COVERT} ${ECHOPORT}
+    ENDTIME=$(/bin/date +"%s.%N")
+
+    RTT=$(echo "($ENDTIME - $STARTTIME) / $NITERS" | bc -l)
+    echo "curveball-http-uni echo RTT $RTT"
+fi
+
+if [ 0 -ne ${DO_CURVEBALL_TLS_UNI} ]; then
+    # Kill the Curveball client (if any) and restart in TLS-UNI mode
+    #
+    # TODO: fix so that this reliably works.  Right now the messages are
+    # too small to push through the system!
+    #
+    ${SUDO} ${PKILL} -f ${CLIENT}
+    ${SUDO} ${CLIENTPATH} -x -d "${DECOY}:443" -u 2> /dev/null &
+    sleep 5
+
+    # Use a very small number of iterations for TLS-UNI because the
+    # latency is very large.
+    #
+    NITERS=50
+
+    CNT=0
+    STARTTIME=$(/bin/date +"%s.%N")
+    while [ $CNT -lt $NITERS ]; do
+	CNT=$((CNT + 1))
+	echo 'hi' | ${ECHOCLIENT} -x localhost:5010 ${COVERT} ${ECHOPORT} > /dev/null
+    done
+    ENDTIME=$(/bin/date +"%s.%N")
+
+    RTT=$(echo "($ENDTIME - $STARTTIME) / $NITERS" | bc -l)
+    echo "curveball-http-uni echo TtFB $RTT"
+
+    STARTTIME=$(/bin/date +"%s.%N")
+    echo 'hi' | ${ECHOCLIENT} -x localhost:5010 -n ${NITERS} -q ${COVERT} ${ECHOPORT}
+    ENDTIME=$(/bin/date +"%s.%N")
+
+    RTT=$(echo "($ENDTIME - $STARTTIME) / $NITERS" | bc -l)
+    echo "curveball-tls-uni echo RTT $RTT"
+fi
+
+# Clean up any clients we left behind
+#
+${SUDO} ${PKILL} -f ${CLIENT}

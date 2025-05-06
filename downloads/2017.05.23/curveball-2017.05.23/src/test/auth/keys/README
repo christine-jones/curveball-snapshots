@@ -1,0 +1,10 @@
+master.km is the master file for the key management and revocation.
+
+master.km.orig is a backup copy of the original master.km file.
+
+These files are initially populated with keys used for debugging
+and testing.  THE "test*" KEYS ARE NOT A SECRET AND SHOULD NEVER
+BE USED ON THE OPEN INTERNET.
+
+keys_short is provided for historical reasons.  It should be
+regenerated, using cbnoc-keymanager, from the master file.

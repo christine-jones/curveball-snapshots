@@ -1,0 +1,259 @@
+#!/usr/bin/env python
+#
+# This material is based upon work supported by the Defense Advanced
+# Research Projects Agency under Contract No. N66001-11-C-4017 and in
+# part by a grant from the United States Department of State.
+# The opinions, findings, and conclusions stated herein are those
+# of the authors and do not necessarily reflect those of the United
+# States Department of State.
+#
+# Copyright 2014-2016 - Raytheon BBN Technologies Corp.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or
+# implied.  See the License for the specific language governing
+# permissions and limitations under the License.
+
+
+# Wrapper for cb-noc-create-sentinel-files and cbnoc-push-sentinels-*.
+#
+# Figures out which tools to run depending on the environment.
+
+"""
+Wrapper to create and push sentinel list files
+"""
+
+import os.path
+import re
+import subprocess
+import sys
+
+from optparse import OptionParser
+
+# The directory that this executable lives in.
+#
+DIRNAME = os.path.normpath(
+        os.path.abspath(os.path.dirname(sys.argv[0]) or '.'))
+
+sys.path.append(os.path.normpath(os.path.join(DIRNAME, '..', 'python')))
+
+import cb.sentman.keystate
+
+def parse_args(argv):
+    """
+    Fetch parameters from the commandline
+    """
+
+    default_key_file = 'keys_short'  
+    default_num_sentinels = cb.sentman.keystate.DEFAULT_SENTINELS_PER_EPOCH
+    default_outdir = './out'
+    default_combined_sbf = False
+    default_safe_mode = False
+    default_hours = 48
+
+    parser = OptionParser("Usage: %prog [options] ")
+
+    parser.add_option('-c', '--combined-sbf',
+            dest='combined_sbf',
+            action='store_true',
+            default=default_combined_sbf,
+            help='Create combined sentinel Bloom Filter')
+
+    parser.add_option('-C', '--local-pusher',
+            dest='local_pusher',
+            action='store_true',
+            default=False,
+            help='Use local pusher')
+
+    parser.add_option('-f', '--host-file',
+            dest='host_file',
+            default=None,
+            help='file listing hosts to push sentinel/BF files to',
+            metavar='PATH')
+
+    parser.add_option('-k', '--key-file',
+            dest='key_file',
+            type=str,
+            # No longer using default_key_file.  Force user to specify
+            #
+            #default=default_key_file,
+            #help='File containing the keys [default=%default]',
+            help='File containing the keys',
+            metavar='PATH')
+
+    parser.add_option('-n', '--num-sentinels',
+            dest='num_sentinels',
+            type=int,
+            default=default_num_sentinels,
+            help='Number of sentinels per hour per key [default=%default]',
+            metavar='NUM')
+
+    parser.add_option('-o', '--outdir',
+            dest='outdir',
+            type=str,
+            default=default_outdir,
+            help='Scratch directory for created files [default=%default]',
+            metavar='PATH')
+
+    parser.add_option('-s', '--safe-mode',
+            dest='safe_mode',
+            action='store_true',
+            default=default_safe_mode,
+            help='Do not overwrite existing files')
+
+    parser.add_option('-S', '--remote-pusher',
+            dest='remote_pusher',
+            action='store_true',
+            default=False,
+            help='Use the remote pusher')
+
+    parser.add_option('-t', '--hours',
+            dest='hours',
+            type=int,
+            default=default_hours,
+            help='# of hours for which to prepare sentinels [default=%default]',
+            metavar='NUM')
+
+    (options, args) = parser.parse_args(argv)
+
+    if options.remote_pusher and options.local_pusher:
+        print 'ERROR: cannot specify both remote and local pushers'
+        parser.print_help()
+        sys.exit(1)
+
+    if len(args) != 0:
+        print 'ERROR: bad command line'
+        parser.print_help()
+        sys.exit(1)
+
+    if options.num_sentinels < 1:
+        print 'ERROR: number of sentinels must be positive'
+        sys.exit(1)
+
+    if not options.key_file:
+        print 'ERROR: no key file specified. See -k below.'
+        parser.print_help()
+        sys.exit(1)
+
+    if not os.path.isfile(options.key_file):
+        print 'ERROR: key file (%s) does not exist!' % (options.key_file)
+        sys.exit(1)
+
+    # In Python, the reliable way to tell whether you can read a file
+    # is to attempt to open it for reading.  os.access() doesn't do what
+    # we want here.
+    #
+    if options.host_file:
+        try:
+            open(options.host_file, 'r')
+        except:
+            print 'ERROR: cannot access host-file [%s]' % options.host_file
+            sys.exit(1)
+
+    return options
+
+def local_pusher(my_dir, options):
+    """
+    Push the files to the proper locations on the local node
+    """
+
+    print 'Pushing to local node...'
+
+    cmd = '%s %s' % (
+            os.path.join(my_dir, 'cbnoc-push-sentinels-loc'),
+            options.outdir)
+    # print cmd
+
+    return os.system(cmd)
+
+def remote_pusher(my_dir, options):
+    """
+    Push the newly-created files (and any other files in outdir)
+    to the remote hosts
+    """
+
+    print 'Pushing to remote nodes...'
+
+    cmd = '%s' % os.path.join(my_dir, 'cbnoc-push-sentinels-rem')
+
+    if options.host_file:
+        cmd += ' -f %s' % options.host_file
+
+    cmd += ' %s' % options.outdir
+
+    # print cmd
+
+    return os.system(cmd)
+
+if __name__ == '__main__':
+
+    def main(argv):
+        options = parse_args(argv[1:])
+
+        (my_dir, _my_name) = os.path.split(argv[0])
+
+        hostname_proc = subprocess.Popen(['/bin/hostname'],
+                stdout=subprocess.PIPE)
+        hostname = hostname_proc.communicate()[0]
+
+        ps_proc = subprocess.Popen(['ps', 'axu'],
+                stdout=subprocess.PIPE)
+        ps_out = ps_proc.communicate()[0]
+
+        if options.local_pusher:
+            pusher = local_pusher
+        elif options.remote_pusher:
+            pusher = remote_pusher
+        elif re.search(' /tmp/pycore.', ps_out):
+            pusher = local_pusher
+        else:
+            pusher = remote_pusher
+
+        print 'Creating sentinels and Bloom filters...'
+
+        sudo = os.path.join('/usr','bin','sudo')
+
+        creator = os.path.join(my_dir, 'cb-noc-create-sentinel-files')
+ 
+        if (pusher == remote_pusher):
+            cmd = "%s" % sudo
+            cmd += " %s" % creator
+        else:
+            cmd = "%s" % creator
+            
+        cmd += " --sentinels=%d" % (options.num_sentinels)
+        cmd += " --hours=%d" % (options.hours)
+        cmd += " --outdir=%s" % (options.outdir)
+
+        if options.safe_mode:
+            cmd += " --safe-mode"
+
+        if options.combined_sbf:
+            cmd += " --combined-sbf=%d" % (options.hours)
+
+        cmd += " %s" % options.key_file
+
+        print '[%s]' % cmd
+
+        code = os.system(cmd)
+        if code:
+            print 'ERROR: sentinel creation failed.'
+            return 1
+
+        print 'Pushing new configurations'
+
+        code = pusher(my_dir, options)
+        if code:
+            print 'ERROR: pusher failed.'
+
+        return code
+
+    exit(main(sys.argv))
+

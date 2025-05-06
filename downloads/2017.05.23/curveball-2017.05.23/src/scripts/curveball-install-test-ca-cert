@@ -1,0 +1,107 @@
+#!/bin/bash 
+#
+# This material is based upon work supported by the Defense Advanced
+# Research Projects Agency under Contract No. N66001-11-C-4017.
+#
+# Copyright 2014 - Raytheon BBN Technologies Corp.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or
+# implied.  See the License for the specific language governing
+# permissions and limitations under the License.
+
+
+# Copy the Curveball CA certificate to the correct place and run the
+# CA configuration utilty
+# Input: full path to the CA certificate 
+#        default: /opt/build/curveball/auth/CA/CURVEBALL_CA.pem
+
+
+# logging/diagnostic functions
+script_name=$(basename "$0")
+log() { printf '%s: %s\n' "${script_name}" "$*"; }
+error() { log "ERROR: $*" >&2; }
+fatal() { error "$*"; exit 1; }
+usage_fatal() { error "$*"; usage >&2; exit 1; }
+
+usage() { 
+    printf '%s %s\n' "${script_name}"  "[CA certificate]"; 
+    exit 1
+}
+
+
+if [ $(id -u) -ne 0 ]; then
+    fatal "must be run as root"
+fi
+
+if [ $# -eq 0 ]; then
+    log "using default location of CA cert"
+    CA_CERTFILE="/opt/curveball/auth/CA/CURVEBALL_CA.pem"
+fi
+
+if [ $# -eq 1 ]; then
+    case $1 in 
+	--help|-h)
+	    usage
+	    ;;
+	*)
+	    CA_CERTFILE="$1"
+    esac
+fi
+
+if [ $# -gt 1 ]; then
+    usage_fatal "Wrong number of arguments"
+fi
+
+if [ ! -f "${CA_CERTFILE}" ]; then
+    fatal "${CA_CERTFILE} not found "
+fi
+
+# Test to confirm that CA_CERTFILE is a certificate
+# check return from "file ${CA_CERTFILE}"
+
+is_cert_file=$(/usr/bin/file "${CA_CERTFILE}")
+if ! [[ "${is_cert_file}" =~ certificate$ ]]; then
+    fatal "${CA_CERTFILE} is not a certificate"
+fi
+
+
+do_install_ca_cert() {
+    certfile=${CA_CERTFILE}
+
+    # this is probably a security hole but uname is in different
+    # places on linux and freebsd
+    platform=$(env uname)
+
+    case "$platform" in 
+	Linux)
+	    LOCALCERTSDIR=/usr/local/share/ca-certificates
+	    LOCALCERTSDIR_CB="${LOCALCERTSDIR}/cb"
+	    log "INSTALLING ${certfile} IN ${LOCALCERTSDIR_CB}"
+	    
+	    # certs ending in .crt under /usr/local/share/ca-certificates
+	    # are implictly trusted and don't need
+	    # /etc/ca-certificates.conf to be edited.
+
+	    /bin/mkdir -p "${LOCALCERTSDIR_CB}"
+
+	    # copy curveball CA cert from build dir 
+	    cert_basename=$(/usr/bin/basename "${certfile}" .pem)
+	    cp "${certfile}" "${LOCALCERTSDIR_CB}/${cert_basename}.crt"
+            
+	    # run CA cert configuration utility
+	    /usr/sbin/update-ca-certificates
+	    ;;
+	*)
+	    error "${platform} not currently supported"
+    esac
+}
+
+do_install_ca_cert

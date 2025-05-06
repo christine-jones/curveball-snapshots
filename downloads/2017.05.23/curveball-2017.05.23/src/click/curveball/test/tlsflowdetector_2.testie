@@ -1,0 +1,66 @@
+/*
+ * This material is based upon work supported by the Defense Advanced
+ * Research Projects Agency under Contract No. N66001-11-C-4017.
+ *
+ * Copyright 2014 - Raytheon BBN Technologies Corp.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or
+ * implied.  See the License for the specific language governing
+ * permissions and limitations under the License.
+ */
+
+%info
+Test the TLSFlowDetector element.
+
+%script
+click -e "
+require(package "curveball");
+
+ip_classifier :: IPClassifier(dst tcp port 4433, -);
+ip_classifier[1] -> Discard;
+
+dr2dp_encoder :: DR2DPEncoder()
+Idle -> dr2dp_encoder -> Discard;
+
+tls_flow_detector :: TLSFlowDetector(PORT 4433,
+                                     TIMEOUT 5,
+                                     SENTINEL \"\xDE\xAD\xBE\xEF\",
+                                     ENCODER dr2dp_encoder);
+Idle -> [1]tls_flow_detector;
+tls_flow_detector[0] -> Discard;
+tls_flow_detector[1] -> Discard;
+tls_flow_detector[2] -> Discard;
+
+add1 :: FromDump(../misc/curveball-capture.tcpdump, STOP true, FORCE_IP true)
+	-> Strip(14)
+        -> ip_classifier
+        -> CheckIPHeader2()
+        -> tls_flow_detector;
+
+DriverManager(
+	wait_stop,
+        print tls_flow_detector.table,
+        wait 10,
+        print tls_flow_detector.table
+)
+"
+
+%expect stdout
+---------- Flow Table ----------
+(127.0.0.1, 32786, 127.0.0.1, 4433)
+--------------------------------
+---------- Flow Table ----------
+--------------------------------
+
+%expect stderr
+SentinelDetector::sentinel_packet: packet contains valid sentinel
+SentinelDetector::run_timer: removed inactive flows; rescheduling timer
+SentinelDetector::run_timer: removed inactive flows; rescheduling timer

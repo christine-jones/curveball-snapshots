@@ -1,0 +1,26 @@
+RANDFILE             = $ENV::HOME/.rnd
+
+[req]
+default_bits         = 2048
+distinguished_name   = req_dn
+req_extensions       = curveball_cert_rqst
+prompt               = no
+
+[ req_dn ]
+C                    = US
+ST                   = Massachusetts
+L                    = Cambridge
+O                    = Raytheon BBN Technologies
+OU                   = BUA
+1.OU                 = Curveball
+2.OU                 = $ENV::NAME
+CN                   = Curveball-${ENV::NAME}
+
+[ curveball_cert_rqst ]
+
+basicConstraints     = CA:FALSE
+nsCertType           = server,client,objsign
+keyUsage             = nonRepudiation,digitalSignature,keyEncipherment,dataEncipherment,keyAgreement
+extendedKeyUsage     = serverAuth,clientAuth
+subjectKeyIdentifier = hash
+subjectAltName       = DNS:${ENV::NAME}.local

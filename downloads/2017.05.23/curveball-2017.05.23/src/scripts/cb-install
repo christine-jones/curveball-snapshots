@@ -1,0 +1,216 @@
+#!/usr/bin/env bash
+#
+# This material is based upon work supported by the Defense Advanced
+# Research Projects Agency under Contract No. N66001-11-C-4017.
+#
+# Copyright 2014 - Raytheon BBN Technologies Corp.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or
+# implied.  See the License for the specific language governing
+# permissions and limitations under the License.
+
+
+# Install Curveball on every node in an EARS/DETER experiment.
+# Some strong assumptions are made about how nodes are named in
+# the experiment: clients have names like client[N], DRs like dr[N],
+# etc.
+
+# logging/diagnostic functions
+script_name=$(basename "$0")
+log() { printf '%s: %s\n' "${script_name}" "$*"; }
+error() { log "ERROR: $*" >&2; }
+fatal() { error "$*"; exit 1; }
+usage_fatal() { error "$*"; usage >&2; exit 1; }
+
+usage() {
+    echo "Usage: $script_name CURVEBALL.deb"
+}
+
+DEBFILE="$1"
+
+if [ ! -e "${DEBFILE}" ]; then
+    fatal "debfile missing"
+fi
+
+node_exists() {
+    nodename="$1"
+    ping -q -c 1 -w 1 ${nodename} > /dev/null 2>&1
+    res=$?
+    return $res
+}
+
+do_install() {
+    nodename=$1
+    debname=$2
+
+    node_exists "${nodename}"
+    if [ $? -eq 0 ]; then
+	echo INSTALLING ON $nodename
+
+	# Uninstall any existing version and install the requested
+	# deb.
+
+	# Uninstall first...  Might also need to shutdown, but how
+	# to shutdown if not installed?
+	#
+	ssh "${nodename}" /usr/bin/sudo /usr/bin/dpkg -r curveball
+
+	# NOTE: dpkg doesn't need stderr, but apt-get fails when
+	# stderr is sent to /dev/null.
+	#
+	ssh "${nodename}" /usr/bin/sudo /usr/bin/dpkg -i "${debname}" \
+		> /dev/null 2>&1
+	ssh "${nodename}" /usr/bin/sudo /usr/bin/apt-get -f -y install \
+		> /dev/null
+
+	# This should be installed already, but better safe than
+	# sorry
+	ssh "${nodename}" /usr/bin/sudo \
+		"/opt/curveball/scripts/curveball-install-test-ca-cert"
+    fi
+}
+
+do_install_dr() {
+    nodename=$1
+
+    node_exists "${nodename}"
+    if [ $? -eq 0 ]; then
+	# There's no longer anything special we need to do
+	# in order to configure the dr node, so just return
+	echo $nodename configured
+    fi
+}
+
+do_install_dp() {
+    nodename=$1
+
+    node_exists "${nodename}"
+    if [ $? -eq 0 ]; then
+	ssh $nodename "cd /opt/curveball/scripts ; sudo ./cb-dp -s"
+    fi
+}
+
+# For web servers, who need to know their node certs and keys.
+do_install_web() {
+    nodename=$1
+
+    node_exists "${nodename}"
+    if [ $? -eq 0 ]; then
+	ssh "${nodename}" /usr/bin/sudo \
+		"/opt/curveball/scripts/cb-install-test-node-cert"
+    fi
+}
+
+# For the client nodes, install a user key.
+do_install_client() {
+    nodename=$1
+
+    # Someday we might choose the kname based on the nodename, but
+    # right now everybody gets the same key.
+    #
+    kname=cbtest0
+
+    node_exists "${nodename}"
+    if [ $? -eq 0 ]; then
+	echo "Setting ${nodename} to use key with kname \"${kname}\""
+	ssh "${nodename}" /usr/bin/sudo \
+		    /opt/curveball/scripts/curveball-key-config -c ${kname}
+    fi
+}
+
+# On DETER, set up a DNS node if there is one in the experiment
+#
+do_install_dns_deter() {
+    nodename=$1
+
+    node_exists "${nodename}"
+    if [ $? -eq 0 ]; then
+	echo "Setting ${nodename} to use DETER DNS configuration"
+	ssh "${nodename}" /usr/bin/sudo \
+		/opt/curveball/scripts/deter/setup-dns-server.sh
+    fi
+}
+
+# Note: we don't currently install anything on the filter and router nodes.
+# This might change at some point.
+#
+NODE_TYPES="client covert decoy dp dr drp noc quilt dns"
+
+onedig="0 1 2 3 4 5 6 7 8 9"
+twodig=""
+
+for digit1 in $onedig; do
+    for digit0 in $onedig; do
+	twodig="$twodig $digit1$digit0"
+    done
+done
+
+NAME_SUFFIXES="$onedig $twodig"
+
+# first, do the basic install everywhere.
+
+for name in $NODE_TYPES; do
+    do_install "$name" "$DEBFILE"
+
+    for suffix in $NAME_SUFFIXES; do
+	nodename="${name}${suffix}"
+	do_install "$nodename" "$DEBFILE"
+    done
+done
+
+for name in dr drp; do
+    do_install_dr "$name"
+
+    for suffix in ${NAME_SUFFIXES}; do
+	nodename="${name}${suffix}"
+	do_install_dr "$nodename"
+    done
+done
+
+for name in dp drp quilt; do
+    do_install_dp "$name"
+
+    for suffix in ${NAME_SUFFIXES}; do
+	nodename="${name}${suffix}"
+	do_install_dp "$nodename"
+    done
+done
+
+for name in covert decoy; do
+    do_install_web "$name"
+
+    for suffix in ${NAME_SUFFIXES}; do
+	nodename="${name}${suffix}"
+	do_install_web "$nodename"
+    done
+done
+
+for name in client; do
+    do_install_client "$name"
+
+    for suffix in ${NAME_SUFFIXES}; do
+	nodename="${name}${suffix}"
+	do_install_client "$nodename"
+    done
+done
+
+# If we're running inside a DETER experiment, or some other
+# similar environment, then set up the DNS node, if any.
+case $(/bin/hostname) in
+    *.deterlab.net)
+	# We're inside DETERLAB: keep going
+	do_install_dns_deter dns
+	;;
+    *)
+	# We're not inside DETERLAB: nothing to do.
+	;;
+esac
+

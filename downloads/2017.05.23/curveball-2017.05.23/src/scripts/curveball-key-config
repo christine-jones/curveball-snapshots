@@ -1,0 +1,195 @@
+#!/usr/bin/env python
+#
+# This material is based upon work supported by the Defense Advanced
+# Research Projects Agency under Contract No. N66001-11-C-4017.
+#
+# Copyright 2014 - Raytheon BBN Technologies Corp.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or
+# implied.  See the License for the specific language governing
+# permissions and limitations under the License.
+
+
+"""
+A script to choose which client keys from the master file
+to use for this client.
+
+This script must only be run on a client, as sudo.
+
+This script is intended only for debugging/testing/evaluation.
+In ordinary circumstances, the client would be provided with a
+key to use (not given a choice) and the client would never have
+access to the master file.
+"""
+
+import binascii
+import os
+import sys
+
+from optparse import OptionParser
+
+# The directory that this executable lives in.
+#
+DIRNAME = os.path.normpath(
+        os.path.abspath(os.path.dirname(sys.argv[0]) or '.'))
+
+sys.path.append(os.path.normpath(os.path.join(DIRNAME, '..', 'python')))
+
+import cb.util.platform
+import cb.sentman.keystate
+import cb.sentman.selfserve
+
+from cb.noc.master import CbkmMasterFile
+from cb.sentman.keystate import SentmanKey
+from cb.sentman.keystate import SentmanKeyCollection
+from cb.sentman.selfserve import SentmanSelfServe
+
+PLATFORM = cb.util.platform.PLATFORM
+
+# Because of permissions issues (accessing the keystate) it is currently
+# necessary to run curveball-key-config as root (or via sudo)
+#
+if PLATFORM in ['android', 'linux2', 'darwin']:
+    if os.geteuid() != 0:
+        if PLATFORM == 'android':
+            # TODO: warn the user with a dialog on Android
+            pass
+        else:
+            print 'ERROR: %s must be run as root or via sudo' % sys.argv[0]
+        sys.exit(1)
+
+def parse_args(argv):
+    """
+    Parse the commandline and check it for basic sanity
+    """
+
+    default_master_path = CbkmMasterFile.default_master_fname()
+
+    usage = 'usage: %prog [options] [kname [kname ...]]\n'
+    usage += '\n'
+    usage += 'Specify the key(s) to use by kname, and reset those keys.\n'
+    usage += 'FOR DEVELOPMENT/TESTING/DEBUGGING ONLY\n'
+
+    parser = OptionParser(usage)
+
+    parser.add_option('-a', dest='avail_knames',
+            default=False, action='store_true',
+            help='Print the knames available in the key file')
+
+    parser.add_option('-c', dest='clear',
+            default=False, action='store_true',
+            help='Clear the cbsmd state, before adding keys')
+
+    parser.add_option('-m', '--master-file', dest='master_path',
+            default=default_master_path,
+            help='Path to the master key management file [default=%default]')
+
+    parser.add_option('-p', '--print', dest='show_state',
+            default=False, action='store_true',
+            help='Print the final cbsmd state')
+
+    (options, args) = parser.parse_args(argv)
+
+    # If the user didn't ask us to do anything at all, then
+    # print a usage message and exit
+    #
+    if ((len(args) == 1) and (not options.avail_knames)
+            and (not options.clear) and (not options.show_state)):
+        parser.print_help()
+        sys.exit(1)
+
+    return (options, args)
+
+def clear_cbsmd(path):
+    """
+    Remove the current cbsmd-ss file, forcing it to be recreated
+    """
+
+    if os.path.isfile(path):
+        try:
+            os.unlink(path)
+        except OSError, exc:
+            print 'ERROR: cannot remove [%s]: %s' % (path, str(exc))
+            sys.exit(1)
+
+if __name__ == '__main__':
+    def client_config_main(argv):
+        """
+        Configure the keys file for this client.
+
+        NOTE: the path to the master file is hardcoded.
+        """
+
+        (opts, args) = parse_args(argv)
+
+        # We only need the master file if the user is asking
+        # to view it, or add new keys from it.
+        #
+        if opts.avail_knames or (len(args) > 1):
+            try:
+                master = CbkmMasterFile(opts.master_path)
+            except BaseException, exc:
+                sys.exit(1)
+
+        if opts.avail_knames:
+            print 'Available knames:'
+            print ' '.join(sorted(master.kname2record.keys()))
+            print ''
+
+        cbsmd_state_path = SentmanSelfServe.default_state_fname()
+
+        records = list()
+        errors = 0
+
+        for kname in args[1:]:
+            if not kname in master.kname2record:
+                print 'ERROR: kname [%s] not found' % kname
+                errors += 1
+            else:
+                records.append(master.kname2record[kname])
+
+        if errors:
+            print 'ERROR: missing knames; no changes made'
+            return 1
+
+        if opts.clear:
+            clear_cbsmd(cbsmd_state_path)
+
+        # It's OK if we put the same key in twice; sentman will
+        # ignore duplicates
+        #
+        for record in records:
+            keystate = SentmanKey(binascii.unhexlify(record.key),
+                    record.kname)
+            try:
+                SentmanSelfServe(keystate)
+            except OSError, exc:
+                print 'ERROR: %s: cannot add kname' % (str(exc), record.kname)
+                break
+
+        # NOTE: no locking, because we are only reading.
+        try:
+            key_collection = SentmanKeyCollection(cbsmd_state_path)
+        except OSError, exc:
+            print 'ERROR: %s: cannot read keystate' % str(exc)
+            return 1
+
+        if len(key_collection.key2state) == 0:
+            print 'WARNING: no keys are active'
+
+        if opts.show_state:
+            for key in key_collection.key2state:
+                print str(key_collection.key2state[key])
+
+        return 0
+
+    sys.exit(client_config_main(sys.argv))
+

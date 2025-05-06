@@ -1,0 +1,23 @@
+On CORE DP:
+nc 10.0.0.10 4435
+GET / HTTP/1.1\nHost: <IPADDR>:80\n\n
+(or any text)
+
+
+On CORE internet:
+nc -l 5002 -k
+HTTP/1.1 200 OK\r\n
+(or any text)
+
+On CORE client:
+   python HTTP_CT_Client.py
+
+
+On CORE internet:   
+   python HTTP_CT_DP.py
+
+   
+To create sentinels: 
+In the scripts directory, do:
+./cb-noc-create-sentinel-files key_short --hour=1 -o ../python/cb/ct/http
+Make sure that reading current files in http_ct_dp: may need to change date

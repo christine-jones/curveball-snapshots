@@ -1,0 +1,57 @@
+/*
+ * This material is based upon work supported by the Defense Advanced
+ * Research Projects Agency under Contract No. N66001-11-C-4017.
+ *
+ * Copyright 2014 - Raytheon BBN Technologies Corp.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or
+ * implied.  See the License for the specific language governing
+ * permissions and limitations under the License.
+ */
+
+%info
+Test the HTTPFlowDetector element.
+
+%script
+click TCPDUMP_CONFIG -h c1.count -h c2.count -h c3.count -h c4.count > OUT1
+
+%file TCPDUMP_CONFIG
+require(package "curveball");
+
+FromDump(../misc/http-cookie.pcap, STOP true, FORCE_IP true)
+	-> Strip(14)
+	-> c1 :: Counter
+	-> ip_classifier :: IPClassifier(dst tcp port 80, -)
+	-> CheckIPHeader
+	-> CheckTCPHeader
+	-> http_flow_detector :: HTTPFlowDetector(SENTINEL 'DEADBEEF')
+	-> c2 :: Counter
+	-> Discard
+
+Idle -> [1]http_flow_detector;
+
+http_flow_detector[1] -> c3 :: Counter -> Discard;
+http_flow_detector[2] -> Discard;
+ip_classifier[1] -> c4 :: Counter -> Discard;
+
+%expect stderr
+HTTPFlowDetector::sentinel_packet: packet contains valid sentinel
+HTTPFlowDetector::process_http_data_packet: DR2DPEncoder not configured; can't redirect flow.
+
+%expect OUT1
+c1.count:
+7
+c2.count:
+4
+c3.count:
+2
+c4.count:
+0

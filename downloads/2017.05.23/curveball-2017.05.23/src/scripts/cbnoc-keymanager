@@ -1,0 +1,392 @@
+#!/usr/bin/env python
+#
+# This material is based upon work supported by the Defense Advanced
+# Research Projects Agency under Contract No. N66001-11-C-4017 and in
+# part by a grant from the United States Department of State.
+# The opinions, findings, and conclusions stated herein are those
+# of the authors and do not necessarily reflect those of the United
+# States Department of State.
+#
+# Copyright 2014-2016 - Raytheon BBN Technologies Corp.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or
+# implied.  See the License for the specific language governing
+# permissions and limitations under the License.
+
+
+"""
+Implements the Curveball Key Manager
+"""
+
+import os
+import re
+import sys
+
+from optparse import OptionParser
+
+# The directory that this executable lives in.
+#
+DIRNAME = os.path.normpath(
+        os.path.abspath(os.path.dirname(sys.argv[0]) or '.'))
+
+sys.path.append(os.path.normpath(os.path.join(DIRNAME, '..', 'python')))
+
+import cb.util.platform
+
+from cb.noc.master import CbkmMasterFile
+from cb.noc.master import CbkmMasterFileRecord
+
+PLATFORM = cb.util.platform.PLATFORM
+
+BAD_COMMAND = 1
+
+# If we're not running on Linux, this app is unsupported.
+#
+if PLATFORM != 'linux2':
+    print 'ERROR: %s requires Linux' % sys.argv[0]
+    sys.exit(1)
+
+# Require root to futz with the master file.  This is awkward
+# for testing.
+#
+if os.geteuid() != 0:
+    print 'ERROR: %s must be run as root or via sudo' % sys.argv[0]
+    sys.exit(1)
+
+
+def parse_args(argv):
+    """
+    Tease the parameters from the argv
+    """
+
+    # TODO: more thinking about what the defaults should be.
+    #
+    default_out_dir = os.path.normpath(os.path.join(DIRNAME, 'out'))
+    default_master_path = CbkmMasterFile.default_master_fname()
+    default_key_path = os.path.normpath(
+            os.path.join(DIRNAME, '..', 'auth', 'keys', 'keys_short'))
+
+    parser = OptionParser()
+
+    parser.add_option('-p', '--push', dest='push',
+            default=False, action='store_true',
+            help='Push changes immediately')
+
+    parser.add_option('-v', '--verbose', dest='verbose',
+            default=False, action='store_true',
+            help='Run in verbose mode')
+
+    parser.add_option('-d', '--out-dir', dest='out_dir',
+            default=default_out_dir,
+            help='Directory containing cbnoc-keymanager state',
+            metavar='PATH')
+
+    parser.add_option('-f', '--host-file', dest='host_file',
+            default=None,
+            help='file listing hosts to push sentinel/BF files to',
+            metavar='PATH')
+
+    parser.add_option('-i', '--interactive', dest='interactive',
+            default=False, action='store_true',
+            help='Execute commands interactively')
+
+    parser.add_option('-m', '--master-file', dest='master_path',
+            default=default_master_path,
+            help='Path to the master key management file [default=%default]')
+
+    parser.add_option('-k', '--key-file', dest='key_path',
+            default=default_key_path,
+            help='Path to the key file to create [default=%default]')
+
+    parser.add_option('-C', '--local', dest='core',
+            default=False, action='store_true',
+            help='Use the local pusher instead of the scp pusher')
+
+    parser.add_option('-S', '--scp-pusher',
+            dest='scp_pusher',
+            action='store_true',
+            default=False,
+            help='Use the scp-based pusher')
+
+    (options, args) = parser.parse_args(argv)
+
+    if options.scp_pusher and options.core:
+        print 'ERROR: only one of -C/--local and -S/--scp-pusher permitted'
+        sys.exit(1)
+
+    return (options, args)
+
+def print_help():
+
+    print """
+    Commands:
+
+    add KNAME
+	Add a new key with the given KNAME.  Fails if the KNAME
+	is already in use.
+
+    query KNAME
+	Query the state of the key with the given KNAME
+
+    rekey KNAME
+	Choose a new key, at random, for the given KNAME
+
+    revoke KNAME
+	Revoke the key with the given KNAME
+
+    unrevoke KNAME
+	Unrevoke the key with the given KNAME
+
+    knames
+	Print a list of the knames in the master file
+
+    list
+	List the contents of the master file
+
+    push
+	Push new sentinel files and Bloom filter files to the
+	DRs and DPs
+
+    save
+	In interactive mode, save the changes to the master file
+	(from previous add, rekey, revoke, or unrevoke commands).
+
+	The "save" operator is currently redundant; changes are saved
+	implicitly by each command that modifies the master file.
+    """
+
+
+def run_command(tokens, master, opts):
+    """
+    Run the given tokenized command against the given master file
+
+    Returns True if the command was successful, BAD_COMMAND if the command
+    is bogus, or False if the command failed in a permanent manner.
+
+    Always saves the master file if there is a possibility that
+    it has been changed.  Therefore the state of the file might
+    change even without a 'save' command.
+    """
+
+    if len(tokens) == 0:
+        return True
+
+    command = tokens[0]
+    parameters = tokens[1:]
+    touched = False
+
+    if command in ['add', 'query', 'rekey', 'revoke', 'unrevoke']:
+        if len(parameters) != 1:
+            # TODO improve
+            print 'ERROR: op [%s] takes one kname as a parameter' % command
+            return False
+
+        kname = parameters[0]
+        try:
+            CbkmMasterFileRecord.verify_kname(kname)
+        except BaseException, exc:
+            print 'Bad kname: ' + str(exc)
+            return True
+
+        if command == 'add':
+            new_record = CbkmMasterFileRecord(CbkmMasterFileRecord.ACTIVE,
+                    kname, None)
+
+            try:
+                master.add_record(new_record)
+		touched = True
+                if opts.verbose:
+                    print str(new_record)
+            except BaseException, exc:
+                print 'Cannot add [%s]: %s' % (kname, str(exc))
+
+        elif command == 'query':
+            if kname in master.kname2record:
+                print str(master.kname2record[kname])
+            else:
+                print 'Error: kname [%s] not found' % kname
+
+        elif command == 'rekey':
+            try:
+                master.rekey_kname(kname)
+		touched = True
+                if opts.verbose:
+                    print str(new_record)
+            except BaseException, exc:
+                print 'Cannot rekey [%s]: %s ' % (kname, str(exc))
+
+        elif command == 'revoke':
+            try:
+                master.revoke_kname(kname)
+		touched = True
+            except BaseException, exc:
+                print 'Cannot revoke [%s]: %s ' % (kname, str(exc))
+
+        elif command == 'unrevoke':
+            try:
+                master.unrevoke_kname(kname)
+		touched = True
+            except BaseException, exc:
+                print 'Cannot unrevoke [%s]: %s ' % (kname, str(exc))
+
+    elif command in ['help', 'knames', 'list', 'push', 'save']:
+        if len(parameters) != 0:
+            # TODO improve
+            print 'ERROR: op [%s] does not take any parameters' % command
+            return False
+
+        if command == 'knames':
+            knames = [ record.kname for record in master.records ]
+            for kname in sorted(knames):
+                print '%s' % kname
+
+        elif command == 'list':
+            knames = [ record.kname for record in master.records ]
+            for kname in sorted(knames):
+                print '%s' % str(master.kname2record[kname])
+
+        elif command == 'push':
+            push_master(master, opts.master_path, opts.key_path, opts.out_dir,
+                    opts.core, opts.scp_pusher, opts.host_file)
+
+        elif command == 'save':
+            master.to_file()
+            master.to_key_file(opts.key_path)
+
+        elif command == 'help':
+            print_help()
+
+    else:
+        print 'ERROR: op [%s] is not valid' % command
+        return BAD_COMMAND
+
+    if touched:
+	master.to_file()
+        master.to_key_file(opts.key_path)
+
+    return True
+
+def push_master(master, master_path, key_file_path, out_dir, core, scp,
+        host_file):
+    """
+    Update master and the files derived from it
+
+    1. write the master file records to disk
+
+    2. rewrite the key file with the set of active knames
+
+    3. build new sentinel files (TODO)
+
+    4. build new sbf files (TODO)
+    """
+
+    master.to_file(master_path)
+
+    master.to_key_file(key_file_path)
+
+    # This is lame; just for debugging
+    cmd = os.path.join(DIRNAME, 'cbnoc-key-setup')
+    cmd += ' -t 12' # Only do 12 hours
+    cmd += ' -k %s' % key_file_path
+    if core:
+        cmd += ' --local-pusher'
+
+    if scp:
+        cmd += ' --scp-pusher'
+
+    if (not core) and host_file:
+        cmd += ' -f %s' % host_file
+
+    # cbnoc-keymanager needs to be run as root, but the pusher doesn't
+    # run properly as root on EARS, so if we're running as root then
+    # sudo back to the original user for this command.
+    #
+    # Yuck.
+    #
+    orig_user = os.getenv('SUDO_USER', None)
+    if orig_user:
+        cmd = '/usr/bin/sudo -u "%s" %s' % (orig_user, cmd)
+
+    print 'Pushing...'
+    os.system(cmd)
+
+def mainloop(master, opts):
+    """
+    Run an interpreter mainloop (which may be interactive or batched)
+
+    If interactive, print prompts.
+    """
+
+    is_tty = sys.stdin.isatty()
+    while True:
+        if is_tty:
+            sys.stdout.write('> ')
+
+        try:
+            line = sys.stdin.readline()
+            if line:
+                tokens = line.split()
+
+                # Even if the command fails, press on.
+                #
+                if not run_command(tokens, master, opts):
+                    return False
+            else:
+                if is_tty:
+                    print "\nBye!"
+                return True
+        except BaseException, exc:
+            print 'ERROR: %s' % str(exc)
+            return False
+
+if __name__ == '__main__':
+    def main():
+        """
+        Test functions; not the real main yet
+        """
+
+        (opts, args) = parse_args(sys.argv)
+
+        # Not bullet-proof, but tests whether the master file exists
+        # or can be created, and gives a basic idea whether we
+        # have access to the master file.
+        #
+        if not os.path.isfile(opts.master_path):
+            if not os.path.isdir(os.path.dirname(opts.master_path or '.')):
+                print 'Dir for master file [%s] missing' % opts.master_path
+                sys.exit(1)
+
+            print 'Creating master file [%s]' % opts.master_path
+            open(opts.master_path, 'w+')
+        elif not os.access(opts.master_path, os.R_OK | os.W_OK):
+            print 'Bad permissions on master file [%s]' % opts.master_path
+            sys.exit(1)
+
+        master = CbkmMasterFile(opts.master_path)
+
+        if not opts.interactive:
+            if not run_command(args[1:], master, opts):
+                return 1
+        else:
+            if len(args) != 1:
+                print 'Error: cannot mix commandline and interactive ops'
+                return 1
+
+            if not mainloop(master, opts):
+                return 1
+
+        if opts.push:
+            push_master(master, opts.master_path, opts.key_path, opts.out_dir,
+                    opts.core, opts.scp_pusher, opts.host_file)
+
+        return 0
+
+    exit(main())

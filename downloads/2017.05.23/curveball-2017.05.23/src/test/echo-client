@@ -1,0 +1,159 @@
+#!/usr/bin/env python
+#
+# This material is based upon work supported by the Defense Advanced
+# Research Projects Agency under Contract No. N66001-11-C-4017.
+#
+# Copyright 2014 - Raytheon BBN Technologies Corp.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or
+# implied.  See the License for the specific language governing
+# permissions and limitations under the License.
+
+"""
+Simple "echo" client to test the end-to-end flow.
+
+Opens a socket to an 'echo-server' at a given ipv4addr and port, and
+then reads input from stdin, prints it, then dumps it down the socket,
+waits for the server to respond, and prints whatever comes back.
+If the -n flag is given, then the same input may be sent multiple
+times (with each send following the receipt of the echo of the previous)
+
+When EOF is detected on stdin, the client loop exits.
+"""
+
+import re
+import socket
+import socks
+import sys
+
+from optparse import OptionParser
+
+def parse_args(argv):
+    """
+    Parse the commandline: $0 ipaddr port
+    """
+
+    parser = OptionParser('usage: %prog [options] IPADDR PORT')
+
+    parser.add_option('-x', dest='proxy_addr',
+            default=None,
+            metavar='HOST:PORT',
+            help='Use a SOCKS proxy at the given address')
+
+    parser.add_option('-n', dest='repetitions',
+            default=1, type='int',
+            metavar='COUNT',
+            help='Count of times to repeat each message')
+
+    parser.add_option('-q', dest='quiet',
+            default=False, action='store_true',
+            help='Quiet mode - do not print as much chatter')
+
+    (opts, args) = parser.parse_args(argv)
+
+    args = args[1:]
+
+    socks_ipaddr = None
+    socks_port = None
+
+    if len(args) != 2:
+        parser.print_help()
+        sys.exit(1)
+
+    ipaddr = args[0]
+    try:
+        port = int(args[1])
+    except BaseException, _exc:
+        print 'ERROR: PORT must be a valid port number'
+        parser.print_help()
+        sys.exit(1)
+
+    if opts.proxy_addr:
+        try:
+            (socks_ipaddr, socks_port) = opts.proxy_addr.split(':')
+            socks_port = int(socks_port)
+        except BaseException, _exc:
+            parser.print_help()
+            sys.exit(1)
+
+        if (socks_port <= 0) or (socks_port >= 64 * 1024):
+            parser.print_help()
+            sys.exit(1)
+
+    if opts.repetitions < 1:
+        opts.repetitions = 1
+
+    return (ipaddr, port, socks_ipaddr, socks_port,
+            opts.repetitions, opts.quiet)
+
+
+def echo_client(params):
+    """
+    Open a socket to the server and write user-supplied data to the server,
+    wait for the response from the server, and dump it to stdout.
+    """
+
+    (ipaddr, port, socks_ipaddr, socks_port, repetitions, quiet) = params
+
+    if socks_ipaddr:
+        sock = socks.socksocket()
+        if not quiet:
+            print 'setting socks proxy to %s:%d' % (socks_ipaddr, socks_port)
+        sock.setproxy(socks.PROXY_TYPE_SOCKS5, socks_ipaddr, socks_port)
+        if not quiet:
+            print 'set socks proxy'
+    else:
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+
+    if not quiet:
+        print 'connecting to %s:%d' % (ipaddr, port)
+    sock.connect((ipaddr, port))
+    if not quiet:
+        print 'connected'
+
+    while 1:
+        if not quiet:
+            sys.stdout.write('>> ')
+        line = sys.stdin.readline()
+
+        if len(line) == 0:
+            if not quiet:
+                print 'done.'
+            return 0
+
+        line = re.sub('\n', '', line)
+        if line == '':
+            continue
+
+        for _repetition in xrange(repetitions):
+            sent_cnt = sock.send(line)
+            if sent_cnt != len(line):
+                if sent_cnt == 0:
+                    print "[Failed write to server]"
+                else:
+                    print "[Partial write to server]"
+
+                return 1
+
+            resp = sock.recv(64 * 1024)
+            if not resp:
+                print "[Lost connection to server]"
+                return 2
+            elif not quiet:
+                print '<< [%s]' % (resp,)
+
+        if repetitions > 1:
+            if not quiet:
+                print '%d repetitions' % repetitions
+
+
+if __name__ == '__main__':
+    sys.exit(echo_client(parse_args(sys.argv)))

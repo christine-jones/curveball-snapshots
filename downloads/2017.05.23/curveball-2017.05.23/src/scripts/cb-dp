@@ -1,0 +1,360 @@
+#!/usr/bin/env python
+#
+# This material is based upon work supported by the Defense Advanced
+# Research Projects Agency under Contract No. N66001-11-C-4017 and in
+# part by a grant from the United States Department of State.
+# The opinions, findings, and conclusions stated herein are those
+# of the authors and do not necessarily reflect those of the United
+# States Department of State.
+#
+# Copyright 2014-2016 - Raytheon BBN Technologies Corp.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or
+# implied.  See the License for the specific language governing
+# permissions and limitations under the License.
+#
+# Copyright 2014 - Raytheon BBN Technologies Corp.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or
+# implied.  See the License for the specific language governing
+# permissions and limitations under the License.
+
+
+import commands
+import ipaddr
+import os
+import random
+import socket
+import sys
+import time
+
+from optparse import OptionParser
+
+# The directory that this executable lives in.
+#
+DIRNAME = os.path.normpath(
+        os.path.abspath(os.path.dirname(sys.argv[0]) or '.'))
+
+sys.path.append(os.path.normpath(os.path.join(DIRNAME, '..', 'python')))
+
+import cb.util.cblogging_setup
+
+import cb.bp
+import cb.util.cb_constants as const
+import cb.util.unbuffered
+cb.util.unbuffered.unbuffer()
+
+# EPOLL is slower with few connections
+#from twisted.internet import epollreactor
+#epollreactor.install()
+from twisted.internet import reactor
+
+import cb.noc.sentinel_watcher
+import cb.noc.dhexp_watcher
+import cb.util.cblogging
+import cb.util.danted_setup
+
+from cb.util.config import read_config
+from cb.util.interface import ip_to_interface
+from cb.vpn.server import VpnServer
+
+# Install required packages and configure any services
+def setup(config, permitted_subnet_name):
+#    print "Installing required packages..."
+#    os.system('sudo apt-get install -y python-dpkt libnetfilter-queue1 python-ipaddr dante-server python-m2crypto')
+
+    print "Configuring danted"
+
+    try:
+        cb.util.danted_setup.danted_setup(permitted_subnet_name,
+                int(config['decoyproxy']['proxy_port']))
+    except BaseException, exc:
+        print 'ERROR: %s' % str(exc)
+        exit(1)
+
+    if config['decoyproxy']['real_dr'] == 'False':
+	print "Configuring IPTables"
+        ip = config['dr2dp']['netfilter_ip']
+
+        iface = ip_to_interface(ip)
+        print "sudo iptables -A FORWARD -i %s -j QUEUE" % iface
+        os.system("sudo iptables -A FORWARD -i %s -j QUEUE" % iface)
+
+def parse_args(argv):
+    """
+    Deduce the parameters from the argv
+    """
+
+    parser = OptionParser()
+
+    default_conf = os.path.normpath(os.path.join(DIRNAME, 'decoyproxy.conf'))
+
+    parser.add_option("-p", "--proxy_port", dest="proxy_port",
+            default=None,
+            help="SOCKS5 server port",
+            metavar="PORT")
+
+    parser.add_option("--permit-deadbeef",
+            action="store_true",
+            default=False,
+            help="Allow deadbeef sentinel")
+
+    parser.add_option("-v", "--vpn-server", dest="cvpn_addr",
+            default=None,
+            help="CVPN server host:port",
+            metavar="IPADDR:PORT")
+
+    parser.add_option("-c", "--configfile", dest="config_file",
+            default=default_conf,
+            help="cb-dp configuration file [default=%default]",
+            metavar="FILENAME")
+
+    parser.add_option("--outbound-dev", dest="outbound_dev",
+            default=None,
+            help="Specify the outbound VPN interface dev",
+            metavar="devicename")
+
+    parser.add_option("-k", "--keyfile",
+            default=None,
+            help="Specify the file containing sentinel keys",
+            metavar='keyfile')
+
+    parser.add_option("-s", "--setup", default=False,
+            action="store_true",
+            help="Only configure/restart danted")
+
+    parser.add_option("-t", "--tls", default=True,
+            action="store_true",
+            help="OBSOLETE (no effect)")
+
+    permitted_subnet = '10.0.0.0/8'
+    parser.add_option('--permitted-subnet', default=permitted_subnet,
+            help='Specify the subnet that is permitted for proxying ' +
+                    '[default=%s]' % permitted_subnet,
+            metavar='IPv4-CIDR')
+
+    parser.add_option('--deter', '--DETER', default=False,
+            action="store_true", dest='deter_mode',
+            help='Choose the outbound-dev using DETER-specific rules')
+
+    (options, _args) = parser.parse_args(argv)
+
+    if options.deter_mode:
+        # linux-specific, unfortunately
+        cmd = "/sbin/route -n | /bin/grep '^10\.'"
+        cmd += " | /usr/bin/awk '{print $8}'"
+        cmd += " | /bin/grep eth | /usr/bin/head -1"
+
+        options.outbound_dev = os.popen(cmd).read().strip()
+
+        print 'Using outbound_dev [%s]' % options.outbound_dev
+
+    return options
+
+
+def start_cvpnd(config):
+    """
+    Start up the CVPN, based on the parameters in the config file.
+
+    NOTE: there's no way to NOT enable the VPN (just like there's no
+    way to NOT enable the SOCKS proxy).  There should be.
+    """
+
+    if 'cvpnd' in config:
+        cvpnd_config = config['cvpnd']
+
+        try:
+            cvpndhost, cvpndport = cvpnd_config['service_addr'].split(':')
+            cvpndport = int(cvpndport)
+
+            tun_subnet = cvpnd_config['tun_subnet']
+            outbound_dev = cvpnd_config['outbound_dev']
+            nameservers = cvpnd_config['nameservers']
+        except KeyError as exc:
+            print 'Missing parameter (%s)' % (str(exc),)
+            return None
+
+        # If we're doing cvpnd, then we need to enable forwarding.
+        #
+        os.system('/sbin/sysctl net.ipv4.ip_forward=1')
+
+        _vpnd = VpnServer(cvpndport, tun_subnet, outbound_dev, nameservers)
+
+        return (cvpndhost, cvpndport)
+
+    else:
+        print 'No configuration for cvpnd; not starting VPN'
+        return None
+
+
+def main():
+
+    options = parse_args(sys.argv)
+    config = read_config(options.config_file)
+    if not config:
+        sys.exit(1)
+
+    # Override config with options
+    # This means you should not use default values in options!
+    for (key,val) in options.__dict__.iteritems():
+        if not val is None:
+            config['decoyproxy'][key] = val
+
+    if config['decoyproxy']['setup']:
+        setup(config, options.permitted_subnet)
+        sys.exit(0)
+
+    else:
+        # Run setup anyway, but continue
+        setup(config, options.permitted_subnet)
+
+    # Imports are here so that optional setup step
+    # has a chance to run first
+    from cb.dr2dp.dr2dp_dp import DR2DP_DP
+    from cb.tcphijack.connection_monitor import ConnectionMonitor
+    from cb.tcphijack.connection_monitor import FlowMonitor
+    from cb.ccp.ccp_dp import CCP_DP
+    from cb.ct.tls.CT_DP2 import CT_DP as CT_TLS_DP
+    from cb.ct.http.HTTP_CT_DP import CT_DP as CT_HTTP_DP
+    from cb.ct.httpuni.HTTP_CT_UNI_DP_NoHijack import CT_DP as CT_HTTP_UNI_DP_NoHijack
+    from cb.ct.tlsuni.TLS_CT_UNI_DP_NoHijack import CT_DP as CT_TLS_UNI_DP_NoHijack
+    from cb.ct.bittorrent.bittorrent_CT_DP import CT_DP as CT_BITTORRENT_DP
+    from cb.util.state import State
+
+    # Randomize the tun listening port, overwriting the config file!
+    config['tcp_engine']['tun_port'] = random.randint(55000, 60000)
+
+
+    state = State()
+
+    if config['decoyproxy']['real_dr'] == 'True':
+        dr2dp_dp = DR2DP_DP(( '',int(config['dr2dp']['dr_listener_port'])))
+    else:
+        from cb.tcphijack.test.dr2dp_dp_nfq import DR2DP_DP_NFQ
+        dr2dp = DR2DP_DP_NFQ()
+
+
+    # Start initializing the sentinels before any flows appear
+    FlowMonitor.sentinels = cb.noc.sentinel_watcher.SentinelManager(
+            config['auth']['sentinel_dir'])
+
+    # FlowMonitor.bittorrent_sentinels = cb.noc.dhexp_watcher.DHexpManager(
+    #         config['auth']['sentinel_dir'])
+    print '%s: warning: no BitTorrent support!' % sys.argv[0]
+    FlowMonitor.bittorrent_sentinels = dict()
+
+    time.sleep(2)
+
+    ccp_listen_addr = ('localhost',int(config['ccp_dp']['ct_listener_port']))
+
+    http_uni_port = int(config['ccp_dp']['http_uni_port'])
+    tls_uni_port = int(config['ccp_dp']['tls_uni_port'])
+
+    # patch these "constants" to have their instance-specific values
+    #
+    const.HTTP_UNI_CT_DP_PORT = http_uni_port
+    const.TLS_UNI_CT_DP_PORT = tls_uni_port
+
+    ct_uni_http_listen_addr = ('localhost', const.HTTP_UNI_CT_DP_PORT)
+    ct_http_uni_dp_nohijack = CT_HTTP_UNI_DP_NoHijack(
+        ct_uni_http_listen_addr, ccp_listen_addr )
+
+    ct_uni_tls_listen_addr = ('localhost', const.TLS_UNI_CT_DP_PORT)
+    ct_tls_uni_dp_nohijack = CT_TLS_UNI_DP_NoHijack(
+        ct_uni_tls_listen_addr, ccp_listen_addr )
+
+
+    if options.permit_deadbeef:
+        conn_monitor = ConnectionMonitor(dr2dp_dp.send_to_dr,
+                                         dr2dp_dp.send_remove_flow, config, True,
+                                         ct_http_uni_dp_nohijack,
+                                         ct_tls_uni_dp_nohijack)
+    else:
+        conn_monitor = ConnectionMonitor(dr2dp_dp.send_to_dr,
+                                         dr2dp_dp.send_remove_flow, config, False,
+                                         ct_http_uni_dp_nohijack,
+                                         ct_tls_uni_dp_nohijack)
+
+    dr2dp_dp.register_dp_recv(conn_monitor.dp_recv,
+                              conn_monitor.redirect_flow,
+                              conn_monitor.handle_icmp)
+    # FIXME --- this happens inside register_dp_recv, which is
+    # probably the right place for it.
+    dr2dp_dp.dp_recv_endpoint = conn_monitor.dp_recv
+
+    ct_tls_listen_addr = (config['tcp_engine']['tun_ip'], 443)
+    ct_http_listen_addr = (config['tcp_engine']['tun_ip'], 80)
+    ct_bittorrent_listen_addr = (config['tcp_engine']['tun_ip'],
+                                 const.BITTORRENT_SERVER_PORT)
+
+    proxyhost = '127.0.0.1'
+    #proxyhost = commands.getoutput('hostname -I').split()[0]
+    proxyport = int(config['decoyproxy']['proxy_port'])
+    print "Proxyhost = %s" % proxyhost
+
+    # Start the cvpnd, if configured to do so.
+    #
+    # FIXME: gross hack to override the outbound_dev
+    if options.outbound_dev:
+        config['cvpnd']['outbound_dev'] = options.outbound_dev
+        print "new outbound device %s" % (options.outbound_dev,)
+
+    cvpn_addr = start_cvpnd(config)
+
+    ct_tls_dp = CT_TLS_DP(ct_tls_listen_addr, ccp_listen_addr)
+    ct_http_dp = CT_HTTP_DP(ct_http_listen_addr, ccp_listen_addr)
+    ct_bittorrent_dp = CT_BITTORRENT_DP(ct_bittorrent_listen_addr, ccp_listen_addr)
+
+    ct_dps = {443:ct_tls_dp, 443:ct_tls_uni_dp_nohijack,
+              80:ct_http_dp, 80:ct_http_uni_dp_nohijack,
+              const.BITTORRENT_SERVER_PORT:ct_bittorrent_dp}
+    ccp_dp = CCP_DP(
+        ccp_listen_addr, (proxyhost, proxyport), False, conn_monitor,
+        ct_dps, cvpn_addr=cvpn_addr)
+
+    ct_tls_dp.set_cm_callback(conn_monitor.cm_callback)
+    ct_http_dp.set_cm_http_callback(conn_monitor.cm_http_callback)
+    ct_bittorrent_dp.set_cm_bittorrent_callback(conn_monitor.cm_bittorrent_callback)
+
+    ct_tls_dp.set_cm_close_callback(conn_monitor.cm_close_callback)
+    ct_http_dp.set_cm_close_callback(conn_monitor.cm_close_callback)
+    ct_bittorrent_dp.set_cm_close_callback(conn_monitor.cm_close_callback)
+    ct_http_uni_dp_nohijack.set_cm_close_callback(
+            conn_monitor.cm_close_callback)
+    ct_tls_uni_dp_nohijack.set_cm_close_callback(
+            conn_monitor.cm_close_callback)
+
+    print "DP Running" # experiment script expects to see this
+    reactor.run()
+
+
+if __name__ == '__main__':
+
+    #  No longer needed. cb-noc-cron-dp deprecated. cbnoc-keymanager
+    #  run via cron
+    #
+    # if socket.getfqdn() == 'papa.nct.bbn.com':
+    #     SETUP_SCRIPT = '/etc/cron.hourly/cb-noc-cron-dp'
+    #     if not os.path.exists(SETUP_SCRIPT):
+    #         print 'ERROR: setup script %s missing' % SETUP_SCRIPT
+    #         exit(1)
+
+    #     os.system(SETUP_SCRIPT)
+
+    main()

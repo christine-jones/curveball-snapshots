@@ -1,0 +1,185 @@
+#!/bin/bash
+#
+# This material is based upon work supported by the Defense Advanced
+# Research Projects Agency under Contract No. N66001-11-C-4017.
+#
+# Copyright 2014 - Raytheon BBN Technologies Corp.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or
+# implied.  See the License for the specific language governing
+# permissions and limitations under the License.
+
+# rootname is the basename of the directory to create/manage.
+#
+# rootprefix is the path to where the $rootname directory lives
+#
+# platform is the name of the platform-specific subdirectory (if any)
+#
+# If rootprefix is relative, it should be prefixed with $(dirname $0)
+# so that it remains correct during operations that chdir.
+#
+# If we do cross-builds, then we might need to set the platform to
+# something (like ${MACHTYPE}), but for now we can leave the platform
+# string empty.
+
+rootname=build
+rootprefix="$(dirname "$0")/../.."
+platform=''
+
+# subdirs is the list of directories to create in the builddir
+
+subdirs=". auth bin lib python scripts"
+
+# logging/diagnostic functions
+script_name=$(basename "$0")
+log() { printf '%s: %s\n' "${script_name}" "$*"; }
+error() { log "ERROR: $*" >&2; }
+fatal() { error "$*"; exit 1; }
+usage_fatal() { error "$*"; usage >&2; exit 1; }
+
+if [ ! -d "${rootprefix}" ]; then
+    fatal "directory $rootprefix missing"
+fi
+
+absroot=$(cd "${rootprefix}" ; pwd)
+rootdir="${absroot}/${rootname}/${platform}"
+
+usage() {
+    cat << EOF
+
+usage: $0 [-r rootname] command
+
+    Maintain the build tree
+
+    -r rootname
+	    install using the given rootname (default=build)
+
+    Commands:
+
+	test - exit cleanly if the build directory has been created,
+	    fail otherwise
+
+	dirname - print the path of the build tree directory
+
+	spotless - remove all build directories (even for other platforms)
+
+	clean - remove the build directory for this platform
+
+	create - create a new build directory for this platform
+
+	listdirs - list all of the directories in the build directory
+
+	listfiles - list all of the files in the build directory
+EOF
+}
+
+if [ "$1" = '' ]; then
+    usage_fatal
+fi
+
+# make sure that all of the ops are OK before starting any of them
+
+while getopts "hr:" opt; do
+    case ${opt} in
+	h)
+	    usage
+	    exit 0
+	    ;;
+	r)
+	    rootname=${OPTARG}
+	    rootdir="${absroot}/${rootname}/${platform}"
+	    ;;
+    esac
+done
+
+shift $((OPTIND - 1))
+
+for op in $*; do
+    case "$op" in
+	create|dirname|listdirs|listfiles|remove|spotless|test)
+	    ;;
+	help)
+	    usage
+	    exit 0
+	    ;;
+	*)
+	    usage_fatal
+	    ;;
+    esac
+done
+
+for op in $*; do
+    case "$op" in
+	test)
+	    # Check that the directory has been created; fail if not
+	    for dir in $subdirs ; do
+		target_dir="${rootdir}"/"${dir}"
+		if [ ! -d "${target_dir}" ]; then
+		    fatal "Expected dir $target_dir does not exist"
+		    exit 1
+		fi
+	    done
+	    exit 0
+	    ;;
+
+	dirname)
+	    echo ${rootdir}
+	    ;;
+
+	spotless)
+	    # Blow away all builds, even for other platforms
+	    if [ -d "${rootdir}" ]; then
+		/bin/rm -rf "${rootdir}" || fatal "Cannot remove ${rootdir}"
+	    fi
+	    ;;
+
+	remove)
+	    # Blow away the build for this platform
+	    if [ -d "${rootdir}" ]; then
+		/bin/rm -rf "${rootdir}" || fatal "Cannot remove ${buildname}"
+	    fi
+	    ;;
+
+	create)
+	    # Create any missing directories in the tree
+	    for dir in $subdirs ; do
+		target_dir="${rootdir}"/"${dir}"
+		if [ ! -d "${target_dir}" ]; then
+		    mkdir -p "${rootdir}"/"${dir}" \
+			    || fatal "Cannot create ${dir}"
+		fi
+	    done
+	    ;;
+
+	listfiles)
+	    # List a manifest of all of the files in the tree
+	    (
+		cd "${rootdir}"
+		find . -type f | grep '..' | sed -e 's/^..//'
+	    )
+	    ;;
+
+	listdirs)
+	    # List a manifest of all of the dirs in the tree
+	    (
+		cd "${rootdir}"
+		find . -type d | grep '..' | sed -e 's/^..//'
+	    )
+	    ;;
+
+	*)
+	    # TODO: Should be a usage message
+	    usage_fatal
+	    ;;
+    esac
+done
+
+exit 0

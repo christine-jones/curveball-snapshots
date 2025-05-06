@@ -1,0 +1,153 @@
+#!/usr/bin/env python
+#
+# This material is based upon work supported by the Defense Advanced
+# Research Projects Agency under Contract No. N66001-11-C-4017.
+#
+# Copyright 2014 - Raytheon BBN Technologies Corp.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or
+# implied.  See the License for the specific language governing
+# permissions and limitations under the License.
+
+
+"""
+Removes files named in the curveball sentinel or SBF convention that became
+invalid in the past more than a given number of seconds in the past.
+
+These files are only valid during a given span of time, so they can
+deleted after that time has passed.
+"""
+
+import os
+import re
+import sys
+import time
+
+# Right now files are considered "too old" and ready to delete if their
+# valid use date was more than a day ago.  This might change, if the
+# refresh interval becomes short (and we want to do this more often) or
+# becomes longer (and files in use 24 hours ago might still be valid
+# to use)
+#
+# Measured in seconds
+#
+TOO_OLD = 60 * 60 * 24
+
+def compare_date_names(date1_str, date2_int, time2_int):
+    """
+    Compare the date represented by date1_str with the integers
+    representing the date2_int (the date) and time2_int (the time
+    within that date).
+
+    Returns -1, 0, or 1 if the date1_str is less than equal to,
+    or greater than the date represented by date2_int and time2_int.
+    """
+
+    match1 = re.search('([0-9]{8})-([0-9]{4})z', date1_str)
+    if not match1:
+        return 0
+
+    date_int1 = int(match1.group(1))
+    time_int1 = int(match1.group(2))
+
+    if date_int1 < date2_int:
+        return -1
+    elif date_int1 > date2_int:
+        return 1
+    elif time_int1 < time2_int:
+        return -1
+    elif time_int1 > time2_int:
+        return 1
+    else:
+        return 0
+
+def usage(progname):
+    """
+    Print a usage message
+    """
+
+    print '''
+Usage: %s DIR SUFFIX
+
+Remove all of the files in DIR with the given SUFFIX and whose name
+contains a "valid use" timestamp indicating that it was valid more
+than one day ago.  The "valid use" timestamp for Curveball files has
+the form YYYYMMDD-HHMMz, and all times are in UTC.
+''' % progname
+
+def find_files(dir_name, suffix):
+    """
+    Return a list (possibly empty) of the names of the files in
+    the directory named dir_name that have the given suffix.
+    The prefix of the path is omitted; only the file names
+    are returned.
+
+    If the dir_name directory does not exist, return an empty list.
+
+    It's possible that os.walk might fail for an unreadable directory.
+    """
+
+    matches = list()
+
+    if not suffix.startswith('.'):
+        suffix = '.' + suffix
+
+    if not os.path.isdir(dir_name):
+        return matches
+
+    try:
+        walker = os.walk(dir_name)
+        (_rootname, _subdnames, fnames) = walker.next()
+    except BaseException, exc:
+        print 'ERROR: cannot read [%s]: %s' % (dir_name, str(exc))
+
+    for fname in fnames:
+        if fname.endswith(suffix):
+            matches.append(fname)
+
+    return matches
+
+def main(argv):
+    """
+    See description above
+    """
+
+    if len(argv) != 3:
+        usage(argv[0])
+        return 1
+
+    dir_name = argv[1]
+    suffix = argv[2]
+
+    now_seconds = time.time()
+    yesterday = time.gmtime(now_seconds - TOO_OLD)
+
+    yesterday_date_int = int(time.strftime('%Y%m%d', yesterday))
+    yesterday_time_int = int(time.strftime('%H%M', yesterday))
+
+    candidates = sorted(find_files(dir_name, suffix))
+
+    for candidate in candidates:
+        match = re.search('([0-9]{8}-[0-9]{4}z)', candidate)
+        if match:
+            date_name = match.group(1)
+            if 0 > compare_date_names(date_name,
+                    yesterday_date_int, yesterday_time_int):
+                path = os.path.join(dir_name, candidate)
+                print '    removing [%s]' % path
+                try:
+                    os.remove(path)
+                except BaseException, exc:
+                    print str(exc)
+
+    return 0
+
+exit(main(sys.argv))

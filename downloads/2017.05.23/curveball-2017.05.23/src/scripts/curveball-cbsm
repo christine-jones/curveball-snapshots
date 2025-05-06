@@ -1,0 +1,101 @@
+#!/usr/bin/env python
+#
+# This material is based upon work supported by the Defense Advanced
+# Research Projects Agency under Contract No. N66001-11-C-4017.
+#
+# Copyright 2014 - Raytheon BBN Technologies Corp.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or
+# implied.  See the License for the specific language governing
+# permissions and limitations under the License.
+
+
+"""
+Implements the client software
+"""
+
+import os
+import re
+import sys
+
+from optparse import OptionParser
+
+# The directory that this executable lives in.
+#
+DIRNAME = os.path.normpath(
+        os.path.abspath(os.path.dirname(sys.argv[0]) or '.'))
+
+sys.path.append(os.path.normpath(os.path.join(DIRNAME, '..', 'python')))
+
+from cb.sentman.selfserve import SentmanSelfServe
+
+import cb.util.platform
+PLATFORM = cb.util.platform.PLATFORM
+
+USAGE = '''
+Allocate a sentinel from the Curveball Sentinel Manager Daemon
+and print it to stdout.  If there is an error, print a diagnostic
+to stderr and exit with a code of 1.
+'''
+
+# Because of permissions issues it is necessary to run anything
+# that accesses the cbsm-ss file as the same user each time, and some
+# options require root, we always require all such programs to
+# be run as root (or via sudo).
+#
+if PLATFORM in ['android', 'linux2', 'darwin']:
+    if os.geteuid() != 0:
+        if PLATFORM == 'android':
+            droid.notifyUI('ERROR: Curveball must be run as root')
+        else:
+            print 'ERROR: %s must be run as root or via sudo' % sys.argv[0]
+        sys.exit(1)
+
+def main():
+    """
+    Allocate a sentinel using the self-serve CBSM.  There are
+    two forms of sentinels: the 256-bit value used by the TLS or
+    HTTP handshakes, or the (sentinel, dh_exp, dh_pub) triple used
+    by the MSE handshake.  The sentinel is always 256 bits in length,
+    while the dh_exp and dh_pub may be as long as 768 bits (as defined
+    by the MSE spec).
+
+    All values are printed as hex strings.
+    """
+
+    parser = OptionParser(usage='%prog [options]', epilog=USAGE)
+
+    parser.add_option('-m', dest='do_mse',
+            default=False, action='store_true',
+            help='Generate a sentinel for use with MSE')
+
+    (options, args) = parser.parse_args(sys.argv)
+
+    if len(args) > 1:
+        parser.print_help()
+        exit(1)
+
+    try:
+        (sentinel, _epoch, _remaining) = SentmanSelfServe.generate(
+                do_mse=options.do_mse)
+
+        # remove all the punctuation, leaving just whitespace
+        # between the tokens for the MSE values
+        #
+        print re.sub("[\(',\)]", '', str(sentinel))
+    except BaseException, exc:
+        print '%s: ERROR: %s' % (sys.argv[0], str(exc))
+        exit(1)
+
+
+if __name__ == '__main__':
+    main()
+    exit(0)

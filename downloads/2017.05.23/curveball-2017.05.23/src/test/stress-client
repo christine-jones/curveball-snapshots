@@ -1,0 +1,397 @@
+#!/usr/bin/env python
+#
+# This material is based upon work supported by the Defense Advanced
+# Research Projects Agency under Contract No. N66001-11-C-4017.
+#
+# Copyright 2014 - Raytheon BBN Technologies Corp.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or
+# implied.  See the License for the specific language governing
+# permissions and limitations under the License.
+
+"""
+Simple "stress test" client to test the end-to-end flow.
+
+Opens a socket to an 'echo-server' at a given ipv4addr and port, and
+then reads input from stdin, prints it, then dumps it down the socket,
+waits for the server to respond, and prints whatever comes back.
+
+When EOF is detected on stdin, the client loop exits.
+"""
+
+import sys
+sys.path.append('../python')
+import random
+import socket
+import socksipy.socks as socks
+
+from optparse import OptionParser
+
+class RandomBuffer(object):
+    """
+    A utility class that creates a long buffer filled with random lowercase
+    letters.  This string is used to create pseudo-random test strings later.
+    """
+
+    def __init__(self, period, max_size):
+        """
+        Create a pseudo-random buffer from which to construct messages that are
+        likely to be unique in the short term and unlikely to repeat or have
+        repeating subsequences, so if a message is missing or part of it is
+        corrupted, it will be easy to detect.
+
+        We do this once because pseudo-random numbers are expensive to compute.
+        If we didn't care about this, we could do things in a simpler and
+        stronger manner.
+        """
+
+        # Bump up the needed_bytes to be a weird size so that when we wrap we
+        # don't always end up in the same place.
+        #
+        # TODO this is sort of weak
+        #
+        needed_bytes = (period * max_size) | 0x3f
+
+        print 'needed bytes = %d' % (needed_bytes,)
+
+        self.prng = random.Random()
+
+        seed = 0
+        self.prng.seed(seed)
+
+        a_val = ord('a')
+        data_items_list = []
+        for _choice in range(0, needed_bytes):
+
+            # TODO:
+            #
+            # This throws away a lot of useful bits...  We should be able to get
+            # a lot more than 4 bits of goodness out of each call to randint()
+            #
+            data_items_list.append(chr(a_val + self.prng.randint(0, 25),))
+
+        self.data_buffer = ''.join(data_items_list)
+        self.data_buffer.lower()
+
+        self.total_buf_len = len(self.data_buffer)
+        self.current_offset = 0
+
+    def next_buf(self, buf_len):
+        """
+        Grab the next slice out of the random buffer.
+
+        We trust the user to not ask for a buf_len that's impossible.
+        TODO: that's a strong assumption.
+        """
+
+        # print 'current_offset = %d' % (self.current_offset,)
+
+        (self.current_offset, buf) = self.get_buf(buf_len,
+                self.current_offset)
+
+        return (self.current_offset, buf)
+
+    def get_buf(self, buf_len, offset):
+        """
+        We trust the user to not ask for a buf_len that's impossible.
+        TODO: that's a strong assumption.
+        """
+
+        offset %= self.total_buf_len
+
+        end_offset = offset + buf_len
+        if end_offset > self.total_buf_len:
+            first_part = self.data_buffer[offset:]
+            remaining = buf_len - len(first_part)
+            second_part = self.data_buffer[:remaining]
+            return (remaining, first_part + second_part)
+        else:
+            new_buf = self.data_buffer[offset:end_offset]
+            return (end_offset, new_buf)
+
+
+def connect_to_server(ipaddr, port, socks_proxy=None):
+    """
+    Connect to the given ipaddr:port (via the socks proxy if specified).
+
+    If the socks is not None, then it must be an (ipaddr, port) tuple.
+    The types of the tuple are not checked here (or checked carefully by the
+    socks module) so they need to be validated before calling this function.
+    """
+
+    if socks_proxy:
+        (proxy_ip, proxy_port) = socks_proxy
+
+        sock = socks.socksocket()
+        print 'setting socks5 proxy to %s:%d' % (proxy_ip, proxy_port)
+        sock.setproxy(socks.PROXY_TYPE_SOCKS5, proxy_ip, proxy_port)
+        print 'set socks proxy'
+    else:
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+
+    print 'connecting to %s' % (str(ipaddr),)
+    sock.connect((ipaddr, port))
+    print 'connected'
+
+    return sock
+
+
+def growing_msg_loop(sock, rand_buf, iters=1, iters_at_size=1,
+        min_size=50, max_size=5000):
+    """
+    Send messages drawn from the rand_buf to the sock and read the responses,
+    starting with messages of min_size and increasing message size to max_size.
+
+    iters - the number of times to execute the outer loop
+
+    iters_at_size - the number of messages to send at each size
+    
+    min_size - the minimum message size (in bytes)
+    
+    max_size - the maximum message size (in bytes)
+
+    Returns a negative number if a hard failure is detected, or a positive
+    non-zero count of the send/recv errors detected.  A return of zero
+    means that there were no detected errors or failures.
+    """
+
+    if rand_buf == None:
+        rand_buf = RandomBuffer(max_size * 20)
+
+    error_cnt = 0
+    for _iter in range(0, iters):
+        for msg_size in range(min_size, max_size):
+            print "msg_size = %d" % (msg_size,)
+
+            result = fixed_msg_loop(sock, rand_buf, iters_at_size, msg_size)
+            if result < 0:
+                return result
+            else:
+                error_cnt += result
+
+    return error_cnt
+
+def fixed_msg_loop(sock, rand_buf, iters=1000, size=50):
+    """
+    Send messages drawn from the rand_buf to the sock and read the responses.
+
+    iters - the number of messages to send / recv
+
+    size - the size of each message (in bytes)
+
+    Returns a negative number if a hard failure is detected, or a positive
+    non-zero count of the send/recv errors detected.  A return of zero
+    means that there were no detected errors or failures.
+    """
+
+    if rand_buf == None:
+        rand_buf = RandomBuffer(size * 20)
+
+    error_cnt = 0
+    while iters > 0:
+        iters -= 1
+
+        (_offset, line) = rand_buf.next_buf(size)
+
+        sent_cnt = 0
+        while sent_cnt < size:
+            cnt = sock.send(line[sent_cnt:])
+            if cnt == 0:
+                break
+            else:
+                sent_cnt += cnt
+
+        if sent_cnt != len(line):
+            if sent_cnt == 0:
+                print "[Failed write to server]"
+            else:
+                print "[Partial write to server]"
+
+            return -1
+
+        # print 'sent %d bytes' % (sent_cnt,)
+
+        recv_cnt = 0
+        resp = ''
+        while recv_cnt < size:
+            recv_resp = sock.recv(size - recv_cnt)
+            if not recv_resp:
+                print "[Lost connection to server]"
+                return -2
+            else:
+                recv_cnt += len(recv_resp)
+                resp += recv_resp
+
+        # print '<< [%s]' % (resp,)
+        # print 'recv %d bytes' % (recv_cnt,)
+
+        if resp.lower() != line:
+            print 'differ\n[%s]\n[%s]' % (line, resp)
+            error_cnt += 1
+
+    return error_cnt
+
+def random_msg_loop(sock, rand_buf, iters=1000, min_size=1, max_size=10000):
+    """
+    Send messages drawn from the rand_buf to the sock and read the responses.
+
+    iters - the number of messages to send / recv
+
+    size - the size of each message (in bytes)
+
+    Returns a negative number if a hard failure is detected, or a positive
+    non-zero count of the send/recv errors detected.  A return of zero
+    means that there were no detected errors or failures.
+    """
+
+    if rand_buf == None:
+        rand_buf = RandomBuffer(max_size * 20)
+
+    prng = random.Random()
+    seed = 0            # TODO: lame
+    prng.seed(seed)
+
+    error_cnt = 0
+    while iters > 0:
+        iters -= 1
+
+        size = prng.randint(min_size, max_size)
+        (_offset, line) = rand_buf.next_buf(size)
+
+        sent_cnt = 0
+        while sent_cnt < size:
+            cnt = sock.send(line[sent_cnt:])
+            if cnt == 0:
+                break
+            else:
+                sent_cnt += cnt
+
+        if sent_cnt != len(line):
+            if sent_cnt == 0:
+                print "[Failed write to server]"
+            else:
+                print "[Partial write to server]"
+
+            return -1
+
+        recv_cnt = 0
+        resp = ''
+        while recv_cnt < size:
+            recv_resp = sock.recv(size - recv_cnt)
+            if not recv_resp:
+                print "[Lost connection to server]"
+                return -2
+            else:
+                recv_cnt += len(recv_resp)
+                resp += recv_resp
+
+        # print '<< [%s]' % (resp,)
+
+        if resp.lower() != line:
+            print 'differ\n[%s]\n[%s]' % (line, resp)
+            error_cnt += 1
+
+    return error_cnt
+
+def parse_args(argv):
+    """
+    Parse the commandline, return the parameters, bail out if anything looks
+    funny.
+    """
+
+    # This is user-surly; if the user doesn't know what the right parameters
+    # look like, we're not much help.
+    #
+    parser = OptionParser(usage='usage: %prog [options] ipaddr port')
+    parser.add_option('-t', dest="test_type",
+            default='c', type='str',
+            help="type of test (r=random, c=constant, s=step up/down")
+
+    parser.add_option('-n', dest="iters",
+            default=1, type='int',
+            help="number of messages to sent per test case")
+
+    parser.add_option('-c', dest="case_cnt",
+            default=0, type='int',
+            help="number of test cases to run")
+
+    parser.add_option('-m', dest="min_msg_size",
+            default=100, type='int',
+            help="minimum message size")
+
+    parser.add_option('-M', dest="max_msg_size",
+            default=0, type='int',
+            help="maximum message size")
+
+    parser.add_option('-x', dest="socks_proxy",
+            default='', type='str',
+            help='socks proxy ipaddr:port')
+
+    (options, args) = parser.parse_args(argv)
+
+    if options.max_msg_size < options.min_msg_size:
+        options.max_msg_size = options.min_msg_size
+
+    if options.socks_proxy:
+        try:
+            # There are a lot of things that can go wrong, but we don't care
+            # about the particulars very much.  Either the parse and conversion
+            # works, or else the user made a mistake.
+            #
+            (ipaddr, port) = options.socks_proxy.split(':')
+            port = int(port)
+            if port <= 0:
+                raise ValueError('bad port')
+            options.socks_proxy = (ipaddr, port)
+        except BaseException, _exc:
+            parser.error('bad socks proxy specification')
+
+    if not options.test_type in ['r', 'c', 's']:
+        parser.error('test_type is not one of r, c, or s')
+
+    if len(args) != 3:
+        parser.error('incorrect number of parameters')
+
+    ipaddr = args[1]
+    port = int(args[2])
+
+    return (options, ipaddr, port)
+
+def main(argv):
+    (options, ipaddr, port) = parse_args(argv)
+
+    rand_buf = RandomBuffer(30, options.max_msg_size)
+
+    try:
+        sock = connect_to_server(ipaddr, port, options.socks_proxy)
+    except BaseException, exc:
+        print "connection failed: %s" % (str(exc),)
+        return 1
+
+    if options.test_type == 's':
+        return growing_msg_loop(sock, rand_buf, iters=options.case_cnt,
+                iters_at_size=options.iters,
+                min_size=options.min_msg_size, max_size=options.max_msg_size)
+    elif options.test_type == 'c':
+        return fixed_msg_loop(sock, rand_buf,
+                iters=options.iters,
+                size=options.min_msg_size)
+    elif options.test_type == 'r':
+        return random_msg_loop(sock, rand_buf,
+                iters=options.iters,
+                min_size=options.min_msg_size, max_size=options.max_msg_size)
+
+
+if __name__ == '__main__':
+    if main(sys.argv) == 0:
+        print 'SUCCESS'
+    else:
+        print 'FAILURE'

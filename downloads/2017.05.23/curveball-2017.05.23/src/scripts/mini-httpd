@@ -1,0 +1,966 @@
+#!/usr/bin/env python
+#
+# This material is based upon work supported by the Defense Advanced
+# Research Projects Agency under Contract No. N66001-11-C-4017 and in
+# part by a grant from the United States Department of State.
+# The opinions, findings, and conclusions stated herein are those
+# of the authors and do not necessarily reflect those of the United
+# States Department of State.
+#
+# Copyright 2014-2016 - Raytheon BBN Technologies Corp.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or
+# implied.  See the License for the specific language governing
+# permissions and limitations under the License.
+
+
+"""
+Twisted protocol implementation of a simple HTTP/HTTPS server.  This is
+not meant to be a full-featured web server; it is only general-purpose
+enough to test Curveball.
+
+This server has several different behaviors, in order to support several
+different tests.
+
+- The default "GET /" returns a small web page that includes info about
+  the web server host.
+
+- A GET of a URL of the form "/?size=N" returns a page containing N
+  random bytes, where N is less than or equal to a given maximum
+  (MAX_REQUEST_SIZE). The sequence of bytes is chosen in such a way to
+  defeat or reduce the effectiveness of most compression schemes
+  (Huffman will still be able to reduce the size by 25%, but who uses
+  Huffman?)
+
+- A GET of a URL of the form "/?slack=N" returns a page containing N
+  bytes containing a repeated ascii-art image.  This image is likely to
+  be easy to compress, but it is also easy to check by eyeball to make
+  sure that the correct content has arrived.
+
+- A GET of a URL of the form "/?seq=N" returns a page containing N bytes
+  constructed from a trivially-compressible pattern.
+
+- A GET of a URL of the form "/?redirect/X" results in a 301 redirect
+  to location "/redirected?path=/X"
+
+- If an "htmldir" is specified, then the GET of a path is checked
+  against the contents of that directory, and if the is a matching file
+  then the contents of that file are returned.  Note that only a subset
+  of MIME types are supported.
+
+- If an "htmldir" is specified, then a path of "/" is treated as
+  "/index.htm" (whether or not such a file exists).
+
+Note for all of the URLs that return a page of a requested size, the
+number of bytes returned might not match the requested size precisely
+because the N also includes the header bytes.  For example, if you ask
+for N=1 you'll get more than one byte because the response will include
+a header that is more than 1 byte long.
+
+"""
+
+import logging
+import os
+import random
+import re
+import socket
+import sys
+import time
+import weakref
+
+from OpenSSL import SSL
+
+# The directory that this executable lives in.
+#
+DIRNAME = os.path.normpath(
+        os.path.abspath(os.path.dirname(sys.argv[0]) or '.'))
+
+from optparse import OptionGroup
+from optparse import OptionParser
+from twisted.internet import interfaces
+from twisted.internet import protocol
+from twisted.internet import reactor
+from twisted.internet import ssl
+from twisted.internet.task import LoopingCall
+from zope.interface import implements
+
+LOG = logging.getLogger('cb.mini-httpd')
+
+# If we're buffering a request and it grows larger than MAX_REQUEST_SIZE,
+# then we assume that it's bogus and shut it down.  (a request larger than
+# MAX_REQUEST_SIZE may be permitted, but we won't wait for more data
+# after this size has been reached)
+#
+MAX_REQUEST_SIZE = 64 * 1024
+
+REDIRECT301_BODY = """<html>
+  <head><title>301 Moved Permanently</title></head>
+  <body>
+    <center><h1>301 Moved Permanently</h1></center>
+    <hr>
+    <center>Baloney</center>
+  </body>
+<html>
+"""
+
+# A dictionary server:timestamp pairs.  The timestamp is the time the
+# connection was opened or the last time a complete request arrived for
+# the server to process.  This table is scanned periodically to find
+# entries whose timestamps are older than the maximum idle period; these
+# connections are forcibly closed.
+#
+# MAX_IDLE_TIME is measured in seconds.
+
+CONNECTION_LAST_USE = weakref.WeakKeyDictionary()
+MAX_IDLE_TIME = 3600
+
+def prune_idle_connections():
+    """
+    Scan through the current table of connections, looking for
+    connections that appear to be stale, and closing them.
+    """
+
+    idle_connections = list()
+    horizon = time.time() - MAX_IDLE_TIME
+
+    for conn in CONNECTION_LAST_USE.keys():
+        if CONNECTION_LAST_USE[conn] < horizon:
+            idle_connections.append(conn)
+
+    for conn in idle_connections:
+        # Wrap in a try just in case the connection closes on
+        # its own before we have a chance to close it.
+        try:
+            LOG.info('aging out %s connection %s',
+                    conn.factory.proto_name, str(conn.transport.getPeer()))
+            conn.transport.loseConnection()
+        except:
+            pass
+
+
+class HttpProtocol(protocol.Protocol):
+    """
+    Basic web server functionality, plus some testing tools
+    """
+
+    pending_data = ''
+
+    def connectionMade(self):
+        CONNECTION_LAST_USE[self] = time.time()
+        LOG.info('made %s connection %s',
+                self.factory.proto_name, str(self.transport.getPeer()))
+
+    def connectionLost(self, reason=protocol.connectionDone):
+        del CONNECTION_LAST_USE[self]
+        LOG.info('lost %s connection %s',
+                self.factory.proto_name, str(self.transport.getPeer()))
+
+    def dataReceived(self, data):
+        self.pending_data += data
+
+        while self.process_pending():
+            pass
+
+    def process_pending(self):
+        """
+        Process as much of the pending_data as we can.
+        """
+
+        msg_prefix = '%s %s' % (
+                self.factory.proto_name, str(self.transport.getPeer()))
+
+        # Try splitting both ways because some of our tools are
+        # buggy and send \n\n.
+
+        elems_r = re.split('\n\n|\r\n\r\n', self.pending_data,
+                maxsplit=1, flags=re.DOTALL)
+
+        if len(elems_r) > 1:
+            elems = elems_r
+            curr_req = elems[0]
+            self.pending_data = elems[1]
+        elif len(self.pending_data) >= MAX_REQUEST_SIZE:
+            # We don't have enough data yet, but we've exceeded
+            # MAX_REQUEST_SIZE; kill it.  Our MAX_REQUEST_SIZE
+            # is much larger than the typical permitted size, so
+            # if we see something this large it's really bogus and
+            # we should drop the connection.
+            #
+            self.transport.loseConnection()
+            return False
+        else:
+            return False
+
+        # We have a complete request; update the last use timestamp
+        #
+        CONNECTION_LAST_USE[self] = time.time()
+
+        if len(curr_req) > MAX_REQUEST_SIZE:
+            # See above: if it's too big, the client is misbehaving.
+            #
+            self.transport.loseConnection()
+            return False
+
+        elif re.match('TRACE\s+', curr_req):
+            LOG.info('%s trace request: [%s]', msg_prefix, curr_req)
+            self.trace_response(curr_req)
+            return True
+
+        match = re.match('GET\s+([^\s]+)', curr_req, re.DOTALL)
+        if not match:
+            LOG.info('%s bad request: [%s]', msg_prefix, curr_req)
+            self.transport.loseConnection()
+            return False
+
+        request = match.group(1)
+
+        match_random = re.match('/\?size=([0-9]+)', request, re.DOTALL)
+        match_slack = re.match('/\?slack=([0-9]+)', request, re.DOTALL)
+        match_seq = re.match('/\?seq=([0-9]+)', request, re.DOTALL)
+        match_file = re.match('/([^\?].*)', request)
+        match_redirect = re.match('/\?redirect/(.*)', request)
+
+        if match_redirect:
+            extra_path = match_redirect.group(1)
+            LOG.info('%s got redirect request: [%s]', msg_prefix, extra_path)
+            self.redirect_response(extra_path)
+        elif match_random:
+            size = int(match_random.group(1))
+            LOG.info('%s got random request: [%d]', msg_prefix, size)
+            self.sized_response(request, size, 'random')
+        elif match_slack:
+            size = int(match_slack.group(1))
+            LOG.info('%s got slack request: [%d]', msg_prefix, size)
+            self.sized_response(request, size, 'slack')
+        elif match_seq:
+            size = int(match_seq.group(1))
+            LOG.info('%s got seq request: [%d]', msg_prefix, size)
+            self.sized_response(request, size, 'seq')
+        elif match_file:
+            fname = match_file.group(1)
+            if self.factory.html_dir:
+                LOG.info('%s got file request: [%s]', msg_prefix, fname)
+                self.file_response(fname)
+            else:
+                LOG.info('%s file [%s] requested but html_dir not set',
+                        msg_prefix, fname)
+                self.error_404(fname)
+        else:
+            LOG.info('%s default request', msg_prefix)
+            if self.factory.html_dir:
+                LOG.info('%s converting to index.htm', msg_prefix)
+                self.file_response('index.htm')
+            else:
+                self.default_response(request)
+
+        return True
+
+    def safe_write(self, buf):
+        """
+        Write the given buf to our transport, and swallow any failures.
+
+        The only likely failures are if the other side closes the socket
+        unexepectedly, or if we overflow some internal buffer.  Either way,
+        don't allow the failure to bring down the server.
+        """
+
+        try:
+            self.transport.write(buf)
+        except BaseException, exc:
+            msg_prefix = '%s %s' % (
+                    self.factory.proto_name, str(self.transport.getPeer()))
+            LOG.warn('%s write failed: %s', msg_prefix, str(exc))
+
+    def redirect_response(self, extra_path):
+        """
+        Construct a redirect for the extra_path.  We pretend
+        that it gets turned into a search query.  This is
+        not intended to match any particular site at present,
+        although it's similar to the typical nginx setup.
+        """
+
+        header = 'HTTP/1.1 301 Moved Permanently\r\n'
+        header += 'Content-Type: text/html\r\n'
+        header += 'Location: /redirected?path=/%s\r\n' % extra_path
+        header += 'Content-Length: %d\r\n' % len(REDIRECT301_BODY)
+        header += 'Connection: keep-alive\r\n'
+        header += '\r\n'
+
+        self.safe_write(header + REDIRECT301_BODY)
+
+    def file_response(self, fname):
+        """
+        Construct and send a response to a request for the
+        file named by fname
+        """
+
+        (_prefix, suffix) = os.path.splitext(fname)
+        types = {
+                '.bmp' : 'image/bmp',
+                '.css' : 'text/css',
+                '.gif' : 'image/gif',
+                '.html' : 'text/html; charset=ISO-8859-1',
+                '.htm' : 'text/html; charset=ISO-8859-1',
+                '.ico' : 'image/x-ico',
+                '.jpeg' : 'image/jpeg',
+                '.jpg' : 'image/jpeg',
+                '.tiff' : 'image/tiff',
+                '.tif' : 'image/tiff',
+                }
+
+        if suffix in types:
+            ftype = types[suffix]
+        else:
+            ftype = 'text/plain'
+
+        # if the absolute path we're looking for doesn't have
+        # the html_dir as a prefix, then squash it.  Don't let
+        # clients climb out of the html_dir.
+        #
+        path = os.path.abspath(os.path.join(self.factory.html_dir, fname))
+        if not path.startswith(self.factory.html_dir):
+            self.error_404(fname)
+            return
+
+        try:
+            body = open(path).read()
+        except IOError, _exc:
+            self.error_404(fname)
+            return
+
+        header = self.response_header(body, ftype)
+        self.safe_write(header + body)
+
+    def trace_response(self, request):
+        """
+        Construct and send a response to a TRACE request
+        """
+
+        body = 'HTTP/1.1 200 OK\r\n'
+        body += 'Transfer-Encoding: chunked\r\n'
+        body += 'Content-Type: message/http\r\n'
+        body += '\r\n'
+        body += '%x\r\n' % (4 + len(request))
+        body += request
+        body += '\r\n\r\n\r\n0\r\n'
+
+        self.safe_write(body)
+
+    def error_400(self, request):
+        """
+        Construct and send a response to an invalid request
+        """
+
+        body = '<html><head><title>400 Bad Request</title></head>\n'
+        body += '<h1>Bad Request</h1>\n'
+        body += '<p>Malformed or illegal request [%s]</p>\n' % request
+        body += '</body></html>\n'
+
+        header = 'HTTP/1.1 400 Bad Request\r\n'
+        header += 'Content-Length: %d\r\n' % len(body)
+        header += 'Content-Type: text/html; charset=ISO-8859-1\r\n'
+        header += '\r\n'
+
+        self.safe_write(header + body)
+        # self.transport.loseConnection()
+
+    def error_404(self, fname):
+        """
+        Construct and send a response to a request for a file
+        that is absent
+        """
+
+        body = '<html><head><title>404 Not Found</title></head>\n'
+        body += '<h1>Not Found</h1>\n'
+        body += '<p>The requested URL /%s was not found' % fname
+        body += ' on this server.</p>\n'
+        body += '</body></html>\n'
+
+        header = 'HTTP/1.1 404 Not Found\r\n'
+        header += 'Content-Length: %d\r\n' % len(body)
+        header += 'Content-Type: text/html; charset=ISO-8859-1\r\n'
+        header += '\r\n'
+
+        self.safe_write(header + body)
+        # self.transport.loseConnection()
+
+    def response_html_prefix(self, request):
+        """
+        Construct and return the prefix of the default html content
+        """
+
+        body = '<html>\n<body>\n'
+
+        if self.factory.message != None:
+            body += 'Message: %s<br>\n' % self.factory.message
+
+        body += 'Request: %s<br>\n' % request
+        body += 'Protocol: %s<br>\n' % self.factory.proto_name
+        body += 'Hostname: %s<br>\n' % socket.gethostname()
+
+        return body
+
+    def response_html_suffix(self):
+        """
+        Construct and return the suffix of the default html content
+        """
+
+        return '</body>\n</html>\n\n'
+
+    @staticmethod
+    def response_header(body, content_type='text/html'):
+        """
+        Construct and return the response header for a given
+        content type and body
+
+        Note that the body is only needed here in order to compute the
+        Content-Length value; it is NOT part of the response_header.
+        """
+
+        header = 'HTTP/1.1 200 OK\r\n'
+        header += 'Content-Type: %s; charset=ISO-8859-1\r\n' % content_type
+        header += 'Content-Length: %d' % len(body)
+        header += '\r\n\r\n'
+
+        return header
+
+    def default_response(self, request):
+        """
+        Construct and send the default response
+        """
+
+        body = self.response_html_prefix(request)
+
+        if self.factory.slack_filler:
+            body += '<pre>\n%s\n</pre>\n' % SLACK
+
+        body += self.response_html_suffix()
+
+        header = self.response_header(body)
+
+        self.create_response_producer(header + body)
+
+    def sized_response(self, request, requested_size, gen_type):
+        """
+        Construct and send a response of the requested size
+        and generator type
+        """
+
+        body_prefix = self.response_html_prefix(request)
+        body_prefix += '<pre>\n'
+
+        body_suffix = '</pre>\n'
+        body_suffix += self.response_html_suffix()
+
+        curr_len = len(body_prefix) + len(body_suffix)
+        if requested_size < curr_len:
+            # we can't go shorter than this.
+            body = body_prefix + body_suffix
+        else:
+            needed_size = requested_size - curr_len 
+
+            if gen_type == 'random':
+                filler = self.factory.random_filler[:needed_size]
+            elif gen_type == 'seq':
+                filler = self.factory.seq_filler[:needed_size]
+            elif gen_type == 'slack':
+                filler = self.factory.slack_filler[:needed_size]
+            else:
+                filler = 'UNKNOWN REQUEST TYPE'
+
+            body = body_prefix + filler + body_suffix
+
+        header = self.response_header(body)
+
+        self.create_response_producer(header + body)
+
+        msg_prefix = '%s %s' % (
+                self.factory.proto_name, str(self.transport.getPeer()))
+        LOG.info('%s response sent', msg_prefix)
+
+    def create_response_producer(self, content):
+        producer = HttpResponseProducer(self, content)
+        self.transport.registerProducer(producer, True)
+        producer.resumeProducing()
+
+
+class HttpResponseProducer(object):
+    """
+    PushProducer for HTTP/HTTPS responses
+    """
+
+    implements(interfaces.IPushProducer)
+
+    def __init__(self, proto, content):
+        self.proto = proto
+        self.paused = False
+
+        self.content = content
+        self.offset = 0
+        self.length = len(content)
+        self.chunksize = 256 * 1024 # Guesstimate; works OK for i7 hardware.
+
+    def pauseProducing(self):
+        """
+        Called by twisted if it detects that we're falling behind
+        """
+
+        self.paused = True
+
+    def resumeProducing(self):
+        """
+        Start/continue producing output
+
+        Pull chunks out of the content, and send them to the transport,
+        only pausing when we're told to.  When we run out of content,
+        unregister ourselves.
+        """
+
+        # print 'RESUMING'
+        self.paused = False
+
+        while (not self.paused) and (self.offset < self.length):
+            chunk = self.content[self.offset : self.offset + self.chunksize]
+            self.offset += self.chunksize
+
+            try:
+                self.proto.transport.write(chunk)
+            except BaseException, exc:
+                msg_prefix = '%s %s' % (
+                        self.factory.proto_name, str(self.transport.getPeer()))
+                LOG.warn('%s write failed: %s', msg_prefix, str(exc))
+                self.proto.transport.unregisterProducer()
+                return
+
+        if self.offset >= self.length:
+            self.proto.transport.unregisterProducer()
+
+    def stopProducing(self):
+        """
+        Not really sure if this ever gets called...
+        """
+        pass
+
+
+class HttpFactory(protocol.ServerFactory):
+    """
+    Handles http connections.
+    """
+
+    protocol = HttpProtocol
+    proto_name = 'http'
+
+    def __init__(self, msg, rand_fill, seq_fill, slack_fill, html_dir):
+
+        self.message = msg
+        self.random_filler = rand_fill
+        self.seq_filler = seq_fill
+        self.slack_filler = slack_fill
+        self.html_dir = html_dir
+
+
+class HttpsFactory(HttpFactory):
+    """
+    Subclass of HttpFactory that handles https connections.
+    """
+
+    protocol = HttpProtocol
+    proto_name = 'https'
+
+def log_stderr(logger):
+    """
+    Add a stderr stream-handler to the given logger.
+
+    Formatter is based on cb.util.cblogging
+    """
+
+    class UnbufferedStreamHandler(logging.StreamHandler):
+        """
+        Subclass of logging.StreamHandler that does a flush
+        after each emit
+        """
+
+        def emit(self, record):
+            super(UnbufferedStreamHandler, self).emit(record)
+            sys.stderr.flush()
+
+
+    serr = UnbufferedStreamHandler()
+    formatter = logging.Formatter(
+            '%(asctime)s %(name)s %(module)s:%(lineno)d ' +
+            '%(levelname)s: %(message)s')
+
+    serr.setFormatter(formatter)
+
+    logger.addHandler(serr)
+
+class ChainedOpenSSLContextFactory(ssl.DefaultOpenSSLContextFactory):
+    """
+    Subclass of DefaultOpenSSLContextFactory that delivers the entire
+    certificate chain from the certfile instead of just the head.
+    (Either behavior is valid, but this behavior is more typical
+    and some applications, curl and wget, actually require it.)
+
+    Based on the DefaultOpenSSLContextFactor, but uses
+    use_certificate_chain_file() instead of use_certificate_file().
+
+    Using use_certificate_chain_file() was suggested by several
+    how-tos and mailing list discussions.
+    """
+
+    def cacheContext(self):
+        if self._context is None:
+            ctx = SSL.Context(self.sslmethod)
+            ctx.set_options(SSL.OP_NO_SSLv2)
+
+            # The exception thrown if the cert or key file is bogus is
+            # nearly impossible to grok, so try to print something useful
+            # instead.
+            try:
+                ctx.use_certificate_chain_file(self.certificateFileName)
+            except BaseException, exc:
+                print 'ERROR: could not load host cert file [%s]' % (
+                        self.certificateFileName)
+                # print 'ERROR: exception %s' % str(exc)
+                sys.exit(1)
+
+            try:
+                ctx.use_privatekey_file(self.privateKeyFileName)
+            except BaseException, exc:
+                print 'ERROR: could not load host private key file [%s]' % (
+                        self.privateKeyFileName)
+                # print 'ERROR: exception %s' % str(exc)
+                sys.exit(1)
+
+            self._context = ctx
+
+
+def main():
+    """
+    Run the mini-httpd, listening on port 80 for http
+    and port 443 for https requests
+    """
+
+    global MAX_IDLE_TIME
+
+    default_alt_http_port = 8080
+    http_port = 80
+    https_port = 443
+    default_max_idle_time = MAX_IDLE_TIME
+    default_filler = 4 * 1024 * 1024
+
+    my_hostname = re.sub('\..*', '', socket.gethostname())
+    default_cert_path = os.path.join(DIRNAME, '..', 'auth', 'nodes',
+            '%s.pem' % my_hostname)
+    default_key_path = os.path.join(DIRNAME, '..', 'auth', 'nodes',
+            '%s.key' % my_hostname)
+
+    default_cert_path = os.path.normpath(default_cert_path)
+    default_key_path = os.path.normpath(default_key_path)
+
+    parser = OptionParser('Usage: %prog [options]')
+
+    parser.add_option('--no-http', dest='use_http',
+            default=True, action='store_false',
+            help='Do not provide HTTP (on port %d)' % http_port)
+
+    parser.add_option('--no-https', dest='use_https',
+            default=True, action='store_false',
+            help='Do not provide HTTPS (on port %d)' % https_port)
+
+    parser.add_option('--no-alt-http', dest='use_alt_http',
+            default=True, action='store_false',
+            help='Do not provide alt-HTTP (by default on port %d)' %
+                    default_alt_http_port)
+
+    parser.add_option('--alt-http-port', dest='alt_http_port',
+            default=default_alt_http_port, type=int, metavar='PORT',
+            help='Use the given alternative HTTP port (default=%default)')
+
+    parser.add_option('--hostname', dest='hostname',
+            default=my_hostname, type=str, metavar='HOSTNAME',
+            help=('Name of the host certificate (default=%default).' +
+                '  Overrides --cert-path and --host-path.'))
+
+    parser.add_option('--max-idle-time', dest='max_idle_time',
+            type=float,
+            default=default_max_idle_time, metavar='SECONDS',
+            help='Kill connections idle for longer than max-idle seconds ' +
+                    '[default=%d]' % default_max_idle_time)
+
+    parser.add_option('--message', dest='message',
+            default=None, metavar='MESSAGE',
+            help='Extra message to include on the default page')
+
+    parser.add_option('--cert-path', dest='cert_path',
+            default=default_cert_path, metavar='PATH',
+            help='Path to the cert file for https [default=%default]')
+
+    parser.add_option('--key-path', dest='key_path',
+            default=default_key_path, metavar='PATH',
+            help='Path to the key file for https [default=%default]')
+
+    parser.add_option('--filler', dest='max_filler', type=int,
+            default=default_filler, metavar='NBYTES',
+            help='Max length of generated web pages' +
+                    '[default=%d]' % default_filler)
+
+    parser.add_option('--rand-filler', dest='rand_filler',
+            default=False, action='store_true',
+            help='[OBSOLETE] Use random filler')
+
+    parser.add_option('--rand-seed', dest='rand_seed',
+            default=None, type=int, metavar='INT',
+            help='Seed for the random number generator')
+
+    parser.add_option('--seq-filler', dest='seq_filler',
+            default=False, action='store_true',
+            help='[OBSOLETE] Use a sequential filler')
+
+    parser.add_option('--htmldir', dest='html_dir',
+            default=None, type=str, metavar='PATH',
+            help='Root directory of files to serve')
+
+    parser.add_option('-q', '--quiet', dest='quiet',
+            default=False, action='store_true',
+            help='Run in quiet mode (less verbose messages)')
+
+    parser.add_option('-s', '--silent', dest='silent',
+            default=False, action='store_true',
+            help='Run in silent mode (no non-error messages)')
+
+    group = OptionGroup(parser, "Default host certificate --cert-path",
+            default_cert_path)
+    parser.add_option_group(group)
+
+    group = OptionGroup(parser, "Default host key --key-path", default_key_path)
+    parser.add_option_group(group)
+
+    (options, args) = parser.parse_args()
+    if args:
+        print 'ERROR: bad commandline\n'
+        parser.print_help()
+        sys.exit(1)
+
+    # if a hostname was specified, override the cert and key paths
+    #
+    if options.hostname != my_hostname:
+
+        # warn the user if the commandline appears to contradict
+        # itself: --hostname always wins
+        #
+        if options.cert_path != default_cert_path:
+            print 'WARNING: --cert-path overridden by --hostname'
+        if options.key_path != default_key_path:
+            print 'WARNING: --key-path overridden by --hostname'
+
+        options.cert_path = os.path.join(DIRNAME, '..', 'auth', 'nodes',
+                '%s.pem' % options.hostname)
+        options.key_path = os.path.join(DIRNAME, '..', 'auth', 'nodes',
+                '%s.key' % options.hostname)
+
+        options.cert_path = os.path.normpath(options.cert_path)
+        options.key_path = os.path.normpath(options.key_path)
+
+    if (not options.use_http) and (not options.use_https):
+        print 'ERROR: a protocol (HTTP, HTTPS, or alt-HTTP) must be selected\n'
+        parser.print_help()
+        sys.exit(1)
+
+    if options.silent:
+        LOG.setLevel(logging.WARN)
+        options.quiet = True
+    elif options.quiet:
+        LOG.setLevel(logging.WARN)
+        log_stderr(LOG)
+    else:
+        LOG.setLevel(logging.INFO)
+        log_stderr(LOG)
+
+    # If the user has asked for both HTTP and alt HTTP, but has
+    # also specified http_port for the alt HTTP port, ignore them.
+    #
+    if (options.use_http and options.use_alt_http
+            and (options.alt_http_port == http_port)):
+        options.use_alt_http = False
+
+    # Similarly, if the user has asked for both HTTPS and alt HTTP,
+    # but has specified https_port for the alt HTTP port, chide them.
+    #
+    if (options.use_https and options.use_alt_http
+            and (options.alt_http_port == https_port)):
+        print 'ERROR: cannot use port %d for HTTPS and alt HTTP' % https_port
+        sys.exit(1)
+
+    # Always create each type of filler, with a default size of
+    # options.max_filler
+    #
+
+    base64 = ('abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ' +
+            '0123456789+-')
+
+    LOG.info('Creating random filler size: %d', options.max_filler)
+
+    if not options.rand_seed:
+        # choose random bytes, throw away the top two bits from
+        # each, and convert to base64
+        #
+        random_filler = bytearray(os.urandom(options.max_filler))
+
+        for ind in xrange(options.max_filler):
+            random_filler[ind] = base64[random_filler[ind] & 0x3f]
+    else:
+        random.seed(options.rand_seed)
+
+        random_filler = bytearray(options.max_filler)
+        for ind in xrange(options.max_filler):
+            random_filler[ind] = base64[random.randint(0, 63)]
+
+    random_filler = str(random_filler)
+
+    LOG.info('Created random filler')
+
+    seq_string = '0123456789abcde\n'
+
+    seq_filler = seq_string * (1 * (options.max_filler / len(seq_string)))
+    seq_filler = seq_filler[:options.max_filler]
+
+    slack_filler = SLACK * (1 + (options.max_filler / len(SLACK)))
+    slack_filler = slack_filler[:options.max_filler]
+
+    min_idle_time = 0.05 # a brief idle time.
+    if options.max_idle_time:
+        if options.max_idle_time < min_idle_time:
+            print 'ERROR: max_idle_time must be > %f' % min_idle_time
+            sys.stdout.flush()
+        MAX_IDLE_TIME = options.max_idle_time
+
+    if options.html_dir:
+        options.html_dir = os.path.abspath(options.html_dir)
+
+    if options.use_http:
+        http_factory = HttpFactory(options.message, random_filler,
+                seq_filler, slack_filler, options.html_dir)
+        reactor.listenTCP(http_port, http_factory)
+
+    if options.use_alt_http:
+        alt_http_factory = HttpFactory(options.message, random_filler,
+                seq_filler, slack_filler, options.html_dir)
+        reactor.listenTCP(options.alt_http_port, alt_http_factory)
+
+    if options.use_https:
+        https_factory = HttpsFactory(options.message, random_filler,
+                seq_filler, slack_filler, options.html_dir)
+
+        if not os.access(options.key_path, os.R_OK):
+            print 'ERROR: key file [%s] missing' % (options.key_path)
+            sys.exit(1)
+        if not os.access(options.cert_path, os.R_OK):
+            print 'ERROR: cert file [%s] missing' % (options.cert_path)
+            sys.exit(1)
+
+        ssl_context = ChainedOpenSSLContextFactory(options.key_path,
+                options.cert_path)
+        reactor.listenSSL(https_port, https_factory, ssl_context)
+
+    # If MAX_IDLE_TIME is very brief, throttle back the idle_poll_time.
+    #
+    idle_poll_time = MAX_IDLE_TIME / 5.0
+    if idle_poll_time < 0.1:
+        idle_poll_time = MAX_IDLE_TIME / 2.0
+
+    scrubber = LoopingCall(prune_idle_connections)
+    scrubber.start(idle_poll_time)
+
+    LOG.info('started')
+    if not options.silent:
+        print 'mini-httpd started'
+        sys.stdout.flush()
+    reactor.run()
+
+HTTP_HEADER = """Expires: -1
+Cache-Control: private, max-age=0
+Content-Type: text/html; charset=UTF-8
+Set-Cookie: DEADBEEF=; expires=Mon, 01-Jan-1990 00:00:00 GMT; path=/; domain=www.example.com
+Set-Cookie: DEADBEEF=; expires=Mon, 01-Jan-1990 00:00:00 GMT; path=/; domain=.www.example.com
+Set-Cookie: DEADBEEF=; expires=Mon, 01-Jan-1990 00:00:00 GMT; path=/; domain=example.com
+Set-Cookie: DEADBEEF=; expires=Mon, 01-Jan-1990 00:00:00 GMT; path=/; domain=.example.com
+Set-Cookie:
+PREF=ID=b3ea023b17fb8aa2:FF=0:TM=1348584965:LM=1348584965:S=Hr66FefGS8lj0K-V;
+expires=Thu, 25-Sep-2014 14:56:05 GMT; path=/; domain=.example.com
+Set-Cookie: NID=64=vh66vIYdcdrUi6Tm3dA5iRtTygNNPp0Ql5gzv39ekielN2Z_tlrHnHjVgMFEhop-9N7nypnpSioUHy3E8Ts2j0V3VuadKdEyWrqpTuU1H9k2vBqRXdf9b9XdEw5NK8Xa;
+expires=Wed, 27-Mar-2013 14:56:05 GMT; path=/; domain=.example.com; HttpOnly
+"""
+
+
+# From www-personal.umich.edu/~saha/ASCII.html: free ascii art.
+SLACK = """
+                                      .M
+                                 .:AMMO:
+                        .:AMMMMMHIIIHMMM.
+              ....   .AMMMMMMMMMMMHHHMHHMMMML:AMF"
+            .:MMMMMLAMMMMMMMHMMMMMMHHIHHIIIHMMMML.
+                 "WMMMMMMMMMMMMMMMMMMH:::::HMMMMMMHII:.
+            .AMMMMMMMHHHMMMMMMMMMMHHHHHMMMMMMMMMAMMMHHHHL.
+          .MMMMMMMMMMHHMMMMMMMMHHHHMMMMMMMMMMMMMHTWMHHHHHML
+         .MMMMMMMMMMMMMMMMMMMHHHHHHHHHMHMMHHHHIII:::HMHHHHMM.
+         .MMMMMMMMMMMMMMMMMMMMMMHHHHHHMHHHHHHIIIIIIIIHMHHHHHM.
+         MMMMMMMMMMMMMMMMMHHMMHHHHHIIIHHH::IIHHII:::::IHHHHHHHL
+         "MMMMMMMMMMMMMMMMHIIIHMMMMHHIIHHLI::IIHHHHIIIHHHHHHHHML
+          .MMMMMMMMMMMMMM"WMMMHHHMMMMMMMMMMMLHHHMMMMMMHHHHHHHHHHH
+         .MMMMMMMMMMMWWMW   ""YYHMMMMMMMMMMMMF""HMMMMMMMMMHHHHHHHH.
+        .MMMMMMMMMM W" V                         W"WMMMMMHHHHHHHHHH
+       "MMMMMMMMMM".                                 "WHHHMH"HHHHHHL
+       MMMMMMMMMMF  .                                         IHHHHH.
+       MMMMMMMMMM .                                  .        HHHHHHH
+       MMMMMMMMMF. .                               .  .       HHHHHHH.
+       MMMMMMMMM .     ,AWMMMMML.              ..    .  .     HHHHHHH.
+     :MMMMMMMMM".  .  F"'    'WM:.         ,::HMMA, .  .      HHHHMMM
+     :MMMMMMMMF.  . ."         WH..      AMM"'     "  .  .    HHHMMMM
+      MMMMMMMM . .     ,;AAAHHWL"..     .:'                   HHHHHHH
+      MMMMMMM:. . .   -MK"OTO L :I..    ...:HMA-.             "HHHHHH
+ ,:IIIILTMMMMI::.      L,,,,.  ::I..    .. K"OTO"ML           'HHHHHH
+ LHT::LIIIIMMI::. .      '""'.IHH:..    .. :.,,,,           '  HMMMH: HLI'
+ ILTT::"IIITMII::.  .         .IIII.     . '""'"             ' MMMFT:::.
+ HML:::WMIINMHI:::.. .          .:I.     .   . .  .        '  .M"'.....I.
+ "HWHINWI:.'.HHII::..          .HHI     .II.    .  .      . . :M.',, ..I:
+  "MLI"ML': :HHII::...        MMHHL     :::::  . :..      .'.'.'HHTML.II:
+   "MMLIHHWL:IHHII::....:I:" :MHHWHI:...:W,,"  '':::.      ..'  ":.HH:II:
+     "MMMHITIIHHH:::::IWF"    '""T99"'  '""    '.':II:..'.'..'  I'.HHIHI'
+       YMMHII:IHHHH:::IT..     . .   ...  . .    ''THHI::.'.' .;H.""."H"
+         HHII:MHHI"::IWWL     . .     .    .  .     HH"HHHIIHHH":HWWM"
+          ""' MMHI::HY""ML,          ...     . ..  :"  :HIIIIIILTMH"
+               MMHI:.'    'HL,,,,,,,,..,,,......,:" . ''::HH "HWW
+               'MMH:..   . 'MMML,: '""MM""'"MMM"      .'.IH'"MH"
+                "MMHL..   .. "MMMMMML,MM,HMMMF    .   .IHM"
+                  "MMHHL    .. "MMMMMMMMMMMM"  . .  '.IHF'
+                    'MMMML    .. "MMMMMMMM"  .     .'HMF
+                     HHHMML.                    .'MMF"
+                    IHHHHHMML.               .'HMF"
+                    HHHHHHITMML.           .'IF..
+                    "HHHHHHIITML,.       ..:F...
+                     'HHHHHHHHHMMWWWWWW::"......
+                       HHHHHHHMMMMMMF"'........
+                        HHHHHHHHHH............
+                          HHHHHHHH...........
+                           HHHHIII..........
+                            HHIII..........
+                             HII.........
+                              "H........
+                                ......
+
+
+                      W H A T - - M E   W O R R Y ?
+"""
+
+if __name__ == '__main__':
+    exit(main())
+

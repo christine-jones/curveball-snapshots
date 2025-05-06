@@ -1,0 +1,168 @@
+/*
+ * This material is based upon work supported by the Defense Advanced
+ * Research Projects Agency under Contract No. N66001-11-C-4017.
+ *
+ * Copyright 2014 - Raytheon BBN Technologies Corp.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or
+ * implied.  See the License for the specific language governing
+ * permissions and limitations under the License.
+ */
+
+%info
+Test the FlowFilter element.
+
+%script
+click -e "
+require(package "curveball");
+
+add1 :: FromIPSummaryDump(ADD1, STOP true)
+	-> AddFilter(f);
+
+redirect1 :: FromIPSummaryDump(REDIRECT1, ACTIVE false, STOP true)
+	-> f :: FlowFilter(TIMEOUT 5)
+	-> i :: Idle; f[0] -> i; f[1] -> i;
+
+remove1 :: FromIPSummaryDump(REMOVE1, ACTIVE false, STOP true)
+	-> RemoveFilter(f);
+
+redirect2 :: FromIPSummaryDump(REDIRECT2, ACTIVE false, STOP true)
+	-> f -> i; f[0] -> i; f[1] -> i;
+
+add2 :: FromIPSummaryDump(ADD2, ACTIVE false, STOP true)
+	-> AddFilter(f);
+
+DriverManager(
+	wait_stop,
+	print f.table,
+	write redirect1.active true,
+	wait_stop,
+	print f.table,
+	write remove1.active true,
+	wait_stop,
+	print f.table,
+	write redirect2.active true,
+	wait_stop,
+	print f.table,
+	wait 5,
+	print f.table,
+	write add2.active true,
+	wait_stop,
+	print f.table,
+	wait 10,
+	print f.table
+)
+"
+
+%file ADD1
+!data src sport dst dport
+10.0.1.1 1001 10.0.2.1 2001
+10.0.1.1 1001 10.0.2.1 2001
+10.0.1.2 1001 10.0.2.1 2001
+10.0.1.1 1002 10.0.2.1 2001
+10.0.1.1 1001 10.0.2.2 2001
+10.0.1.1 1001 10.0.2.1 2002
+10.0.2.1 2001 10.0.1.1 1001
+10.0.1.2 1002 10.0.2.2 2002
+
+%file REDIRECT1
+!data src sport dst dport
+10.0.1.1 1001 10.0.2.1 2001
+10.0.2.1 2001 10.0.1.1 1001
+10.0.3.1 3001 10.0.4.1 4001
+
+%file REMOVE1
+!data src sport dst dport
+10.0.1.2 1001 10.0.2.1 2001
+10.0.1.1 1002 10.0.2.1 2001
+10.0.1.1 1001 10.0.2.2 2001
+10.0.1.1 1001 10.0.2.1 2002
+10.0.1.1 1001 10.0.2.1 2002
+
+%file REDIRECT2
+!data src sport dst dport
+10.0.1.1 1001 10.0.2.1 2001
+10.0.1.2 1001 10.0.2.1 2001
+10.0.1.1 1001 10.0.2.2 2001
+
+%file ADD2
+!data src sport dst dport
+10.0.4.1 4001 10.0.5.1 5001
+10.0.5.1 5001 10.0.6.1 6001
+
+//%expect stdout
+//---------- FlowFilter ----------
+//(10.0.1.1, 1001, 10.0.2.1, 2001)
+//(10.0.1.2, 1001, 10.0.2.1, 2001)
+//(10.0.2.1, 2001, 10.0.1.1, 1001)
+//(10.0.1.1, 1002, 10.0.2.1, 2001)
+//(10.0.1.2, 1002, 10.0.2.2, 2002)
+//(10.0.1.1, 1001, 10.0.2.1, 2002)
+//(10.0.1.1, 1001, 10.0.2.2, 2001)
+//--------------------------------
+//---------- FlowFilter ----------
+//(10.0.1.1, 1001, 10.0.2.1, 2001)
+//(10.0.1.2, 1001, 10.0.2.1, 2001)
+//(10.0.2.1, 2001, 10.0.1.1, 1001)
+//(10.0.1.1, 1002, 10.0.2.1, 2001)
+//(10.0.1.2, 1002, 10.0.2.2, 2002)
+//(10.0.1.1, 1001, 10.0.2.1, 2002)
+//(10.0.1.1, 1001, 10.0.2.2, 2001)
+//--------------------------------
+//---------- FlowFilter ----------
+//(10.0.1.1, 1001, 10.0.2.1, 2001)
+//(10.0.2.1, 2001, 10.0.1.1, 1001)
+//(10.0.1.2, 1002, 10.0.2.2, 2002)
+//--------------------------------
+//---------- FlowFilter ----------
+//(10.0.1.1, 1001, 10.0.2.1, 2001)
+//(10.0.2.1, 2001, 10.0.1.1, 1001)
+//(10.0.1.2, 1002, 10.0.2.2, 2002)
+//--------------------------------
+//---------- FlowFilter ----------
+//(10.0.1.1, 1001, 10.0.2.1, 2001)
+//(10.0.2.1, 2001, 10.0.1.1, 1001)
+//(10.0.1.2, 1002, 10.0.2.2, 2002)
+//--------------------------------
+//---------- FlowFilter ----------
+//(10.0.1.1, 1001, 10.0.2.1, 2001)
+//(10.0.2.1, 2001, 10.0.1.1, 1001)
+//(10.0.4.1, 4001, 10.0.5.1, 5001)
+//(10.0.5.1, 5001, 10.0.6.1, 6001)
+//(10.0.1.2, 1002, 10.0.2.2, 2002)
+//--------------------------------
+//---------- FlowFilter ----------
+//--------------------------------
+
+//%expect stderr
+//FlowFilter::add_flow: inserted flow (10.0.1.1, 1001, 10.0.2.1, 2001)
+//FlowFilter::add_flow: inserted flow (10.0.1.1, 1001, 10.0.2.1, 2001)
+//FlowFilter::add_flow: inserted flow (10.0.1.2, 1001, 10.0.2.1, 2001)
+//FlowFilter::add_flow: inserted flow (10.0.1.1, 1002, 10.0.2.1, 2001)
+//FlowFilter::add_flow: inserted flow (10.0.1.1, 1001, 10.0.2.2, 2001)
+//FlowFilter::add_flow: inserted flow (10.0.1.1, 1001, 10.0.2.1, 2002)
+//FlowFilter::add_flow: inserted flow (10.0.2.1, 2001, 10.0.1.1, 1001)
+//FlowFilter::add_flow: inserted flow (10.0.1.2, 1002, 10.0.2.2, 2002)
+//FlowFilter::remove_flow: removed flow (10.0.1.2, 1001, 10.0.2.1, 2001)
+//FlowFilter::remove_flow: removed flow (10.0.1.1, 1002, 10.0.2.1, 2001)
+//FlowFilter::remove_flow: removed flow (10.0.1.1, 1001, 10.0.2.2, 2001)
+//FlowFilter::remove_flow: removed flow (10.0.1.1, 1001, 10.0.2.1, 2002)
+//FlowFilter::remove_flow: removed flow (10.0.1.1, 1001, 10.0.2.1, 2002)
+//FlowFilter::run_timer: removed inactive flows; rescheduling timer
+//FlowFilter::add_flow: inserted flow (10.0.4.1, 4001, 10.0.5.1, 5001)
+//FlowFilter::add_flow: inserted flow (10.0.5.1, 5001, 10.0.6.1, 6001)
+//FlowFilter::remove_flow: removed flow (10.0.1.1, 1001, 10.0.2.1, 2001)
+//FlowFilter::remove_flow: removed flow (10.0.2.1, 2001, 10.0.1.1, 1001)
+//FlowFilter::remove_flow: removed flow (10.0.1.2, 1002, 10.0.2.2, 2002)
+//FlowFilter::run_timer: removed inactive flows; rescheduling timer
+//FlowFilter::remove_flow: removed flow (10.0.4.1, 4001, 10.0.5.1, 5001)
+//FlowFilter::remove_flow: removed flow (10.0.5.1, 5001, 10.0.6.1, 6001)
+//FlowFilter::run_timer: removed inactive flows; rescheduling timer

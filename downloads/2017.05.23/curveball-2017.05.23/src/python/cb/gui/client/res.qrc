@@ -1,0 +1,9 @@
+<RCC>
+  <qresource prefix="curveball">
+    <file>res/bckgnd_main.png</file>
+    <file>res/button_off.png</file>
+    <file>res/button_on.png</file>
+    <file>res/button_starting.png</file>
+    <file>res/icon_warning.png</file>
+  </qresource>
+</RCC>

@@ -1,0 +1,731 @@
+#!/usr/bin/env python
+#
+# This material is based upon work supported by the Defense Advanced
+# Research Projects Agency under Contract No. N66001-11-C-4017 and in
+# part by a grant from the United States Department of State.
+# The opinions, findings, and conclusions stated herein are those
+# of the authors and do not necessarily reflect those of the United
+# States Department of State.
+#
+# Copyright 2014-2016 - Raytheon BBN Technologies Corp.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or
+# implied.  See the License for the specific language governing
+# permissions and limitations under the License.
+
+
+"""
+Implements the client software
+"""
+
+import atexit
+import logging
+import os
+import os.path
+import re
+import signal
+import socket
+import subprocess
+import sys
+import tempfile
+import time
+
+from optparse import OptionParser
+
+# The directory that this executable lives in.
+#
+DIRNAME = os.path.normpath(
+        os.path.abspath(os.path.dirname(sys.argv[0]) or '.'))
+
+sys.path.append(os.path.normpath(os.path.join(DIRNAME, '..', 'python')))
+
+import cb.util.cblogging_setup
+
+import cb.util.cb_constants
+import cb.util.unbuffered
+cb.util.unbuffered.unbuffer()
+
+import cb.util.platform
+PLATFORM = cb.util.platform.PLATFORM
+
+# Append path if on an Android platform
+if cb.util.platform.PLATFORM == 'android':
+    isAndroid = True
+    import android
+    droid = android.Android()
+
+    import cb.util.androidhandler
+    sys.stderr = cb.util.androidhandler.AndroidIOHandler()
+    sys.stdout = cb.util.androidhandler.AndroidIOHandler()
+
+    sys.path.append('/mnt/sdcard/com.bbn.curveball/extras/python/site-packages')
+else:
+    isAndroid = False
+
+# Because of permissions issues (see ticket:782) it is currently
+# necessary to run curveball-clientas the same user each time, and some
+# options require root, we always require it to be run as root
+# (or via sudo).
+#
+if PLATFORM in ['android', 'linux2', 'darwin']:
+    if os.geteuid() != 0:
+        if PLATFORM == 'android':
+            droid.notifyUI('ERROR: Curveball must be run as root')
+        else:
+            print 'ERROR: %s must be run as root or via sudo' % sys.argv[0]
+        sys.exit(1)
+
+import cb.sentman.selfserve
+import cb.sentman.server
+import cb.util.cbchooser_util
+import cb.util.cblogging
+import cb.util.ptree
+
+from remora.client import remora_simple_request
+
+from cb.sentman.client import SentmanClient
+from cb.sentman.client import SentmanServerNotAvailable
+from cb.sentman.response import SentmanResponse
+from cb.sentman.selfserve import SentmanSelfServe
+
+cb.util.cblogging.CurveballLogger.logger.setLevel(logging.WARN)
+
+# How often to check whether the client-agent has crashed or hung up.
+#
+AGENT_POLL_INTERVAL = 1
+
+# Are we connected?
+CONNECTED = False
+
+def connected_callback(_dummy):
+    global CONNECTED
+
+    CONNECTED = True
+
+# set to False if no debug messages desired.
+print_debug = False
+
+def debug(msg):
+    if print_debug:
+        print >> sys.stderr, "%s: %s" % (sys.argv[0], msg)
+
+
+if sys.platform == 'win32':
+    import cb.util.winpin
+
+
+def parse_args(argv):
+    """
+    Deduce the parameters from the argv
+    """
+
+    # I'm just making these up as an example.  Beware.
+    default_vpn_subnets = '10.2.0/24,10.2.1/24'
+
+    parser = OptionParser()
+
+    parser.add_option('-P', '--probe', dest='probe_only',
+            default=False, action='store_true',
+            help='Probe decoy hosts, but do not start a local proxy')
+
+    parser.add_option("-d", "--decoy", dest="decoy_addr",
+            default="localhost:5011",
+            help="Decoy host's address [default=%default]",
+            metavar="IPADDR:PORT")
+
+    parser.add_option('--trawler-file', dest='trawler_fname',
+            default=None,
+            help='Filename of trawler results (used to find decoy hosts)',
+            metavar='FNAME')
+
+    parser.add_option('--decoy-port', dest='decoy_port',
+            default=443, type=int,
+            help='Port to use when contacting the decoy host ' \
+                    + '(for hosts found in the trawler file)',
+            metavar='PORTNUM')
+
+#    parser.add_option("-n", "--nss", dest="use_nss",
+#                      default=False, action="store_true",
+#                      help="Use nss instead of openssl [default=%default]")
+
+    parser.add_option("-p", "--proxy", dest="proxy_port",
+            default="5010",
+            help="Proxy server port (ccp port) [default=%default]",
+            metavar="PORT")
+
+    parser.add_option('--tunnel-port', dest='tunnel_port',
+            default=4435, type=int,
+            help='Port to use for the Curveball agent tunnel',
+            metavar='PORTNUM')
+
+    parser.add_option("-g", "--gui",
+            default=False, action="store_true",
+            help="Run with a Graphical User Environment " +
+                    "(Requires Python-PySide)")
+
+    parser.add_option("-x", "--crypto",
+            default=False, action="store_true",
+            help="Use real keys")
+
+    parser.add_option("-v", "--vpn", dest="vpn",
+            default=False, action="store_true",
+            help="Create a VPN [default=%default]")
+
+    parser.add_option("--vpn-default", dest="vpn_default",
+            default=False, action="store_true",
+            help="Use the VPN for the default route. " +
+                    "NOTE: DO NOT USE ON DETER [default=%default]")
+
+    parser.add_option('-c', '--covert',
+            default=default_vpn_subnets, dest='covert_subnets',
+            help="Subnets to VPN [default=%s]" % default_vpn_subnets)
+
+    parser.add_option('--no-covert-dns', dest='no_covert_dns',
+            default=False, action='store_true',
+            help='Do not use a "covert" DNS server [default=%default]')
+
+    parser.add_option('-w', '--http',
+            default=False, action='store_true',
+            help="Run with http tunnel instead of https")
+
+    parser.add_option('-u', '--unidirectional',
+            default=False, action='store_true',
+            help="Run with unidirectional tunnel")
+
+    parser.add_option('--auto-stop',
+            type='int', dest='auto_stop_time', default=-1,
+            metavar='SECONDS',
+            help='Automatically halt after the given number of seconds')
+
+    parser.add_option('-r', '--remora',
+            default=False, action='store_true',
+            help="Run in remora mode")
+
+    parser.add_option('--remora-port', dest='remora_port',
+            metavar="PORT", type=int, default=4003,
+            help="Remora server port; [default=%default]")
+
+    parser.add_option('--slow-chaff', dest='slow_chaff',
+            default=False, action='store_true',
+            help='Run slowly, to avoid overwhelming the DP')
+
+    parser.add_option('-S', '--srcaddr', dest='use_srcaddr',
+            metavar='IPADDR', type=str, default=None,
+            help='Bind to the given source addr instead of the default')
+
+    (options, _args) = parser.parse_args(argv)
+
+    # check that the user doesn't try to do ask for an impossible combination
+    # of parameters.  For example, if we're in probe-only mode, then we cannot
+    # also be in VPN mode and we should not run the GUI.
+
+    if options.probe_only and options.vpn:
+        print 'WARNING: "probe" and "vpn" modes are mutually exclusive.'
+        print 'WARNING: defaulting to "probe" mode.'
+        options.vpn = False
+
+    if options.probe_only and options.gui:
+        print 'WARNING: "probe" and "gui" modes are mutually exclusive.'
+        print 'WARNING: defaulting to "probe" mode.'
+        options.gui = False 
+
+    if options.slow_chaff:
+        from cb.ccp.ccp_client import DstProtocol
+
+        cb.util.cb_constants.TLS_SEND_CHAFF_INTERVAL *= 3.0
+        cb.util.cb_constants.TLS_UNI_CHAFF_URL_PATH = '0' * 256 * 2
+        cb.util.cb_constants.TLS_UNI_CHAFF_URL_PATH_LEN = \
+                len(cb.util.cb_constants.TLS_UNI_CHAFF_URL_PATH)
+
+        DstProtocol.chaffling = DstProtocol.slow_chaffling
+
+    # FIXME: yuck: parse the args and put them back in the options.
+    options.covert_subnets = re.split(',', options.covert_subnets)
+
+    # FIXME - we assume that the user gives us good values.  This is weak.
+
+    debug('Local port: %s' % options.proxy_port)
+    proxy_addr = ('', int(options.proxy_port))
+
+    if options.trawler_fname:
+        try:
+            hosts = cb.util.cbchooser_util.parse_dump(options.trawler_fname,
+                    host_only=True)
+        except BaseException, exc:
+            # FIXME do something graceful
+            raise exc
+
+        decoy_addrs = [ (host, options.decoy_port) for host in hosts ]
+
+        print decoy_addrs
+    else:
+        (host, port) = options.decoy_addr.split(':')
+
+        # Check that the host name obeys RFC 1123.  Note that this doesn't
+        # support internationalized hostnames, and we do not check the
+        # length of each label.
+        #
+        label = '[a-zA-Z0-9-]*[a-zA-Z0-9]'
+        if ((len(host) > 255) or
+                (not re.match('^(%s\.)*(%s)$' % (label, label), host))):
+            print 'ERROR: bad hostname [%s]' % host
+            sys.exit(1)
+
+            # Check that the port is plausible.
+            #
+            if (int(port) < 1) or (int(port) > 65536):
+                print 'ERROR: bad port (%s)' % port
+                sys.exit(1)
+
+        decoy_addrs = list([(host, int(port))])
+
+    debug('decoy host addrs: %s' % (str(decoy_addrs),))
+
+    return (options, proxy_addr, decoy_addrs)
+
+def kill_client_agent():
+    # NOTE: if you're running quilting on windows, this will
+    # utterly fail.  Fix by fixing kill_ptree to work on Windows.
+    #
+    if sys.platform == 'win32':
+	os.system('taskkill -f -im client-agent.exe')
+    else:
+        cb.util.ptree.kill_ptree(os.getpid(), signal.SIGTERM)
+	# os.system('killall client-agent')
+
+def run_client_agent(decoy_host, decoy_port, tunnel_port,
+        use_real_sentinels, sentinel, use_unidirectional,
+        use_srcaddr=None):
+    """
+    Run the client-agent, and attempt to connect to the given decoy_host and
+    port.  If successful, return the subprocess.Popen instance of the process
+    running the client-agent so the caller can poll it to make sure that it's
+    still alive.  Otherwise, return None to indicate failure.
+    """
+
+    # Start the client agent
+
+    if use_real_sentinels:
+        deadbeef = ''
+    else:
+        deadbeef = '-d'
+
+    # client-agent could either be in ../../nss-bin or nss-bin/
+    if os.path.exists(os.path.join(DIRNAME, 'nss-bin/client-agent.exe')):
+        cmd = "cd nss-bin && client-agent.exe -h %s -p %d %s -A %d" % (
+                decoy_host, decoy_port, deadbeef, tunnel_port)
+        if not deadbeef:
+            cmd += ' -s %s' % sentinel
+        if use_unidirectional:
+            cmd += ' -u'
+        use_shell = True
+    else:
+        # If we can't find the client-agent, we're in trouble.
+
+        bindir_candidate1 = os.path.join(DIRNAME, '..', 'bin')
+        bindir_candidate2 = os.path.join(DIRNAME, '..', '..', 'build', 'bin')
+
+        if os.path.exists(bindir_candidate1):
+            bindir = bindir_candidate1
+        elif os.path.exists(bindir_candidate2):
+            bindir = bindir_candidate2
+        else:
+            print "ERROR: binary directory not found!"
+            sys.exit(1)
+
+        client_agent_path = os.path.join(bindir, 'client-agent')
+        if not os.path.exists(client_agent_path):
+            print "ERROR: client-agent binary not found!"
+            sys.exit(1)
+
+        ld_lib_path = os.path.normpath(
+                os.path.join(bindir, '..', 'lib'))
+        certdb_path = os.path.normpath(
+                os.path.join(bindir, '..', 'auth', 'certdb'))
+        if sys.platform != 'win32':
+            os.putenv("LD_LIBRARY_PATH", ld_lib_path)
+        cmd = [ client_agent_path,
+                "-h", decoy_host,
+                "-p", "%d" % decoy_port,
+                "-c", certdb_path,
+                "-A", "%d" % tunnel_port ]
+
+        if not use_real_sentinels:
+            cmd.append("-d")
+        else:
+            cmd.append('-s')
+            cmd.append(sentinel)
+
+        if use_unidirectional:
+            cmd.append('-u')
+
+        if use_srcaddr:
+            cmd.append('-S')
+            cmd.append(use_srcaddr)
+
+        use_shell = False
+
+    try:
+        debug("running client-agent: [%s]" % ' '.join(cmd))
+        ct = subprocess.Popen(cmd, shell=use_shell)
+    except OSError, e:
+        print "Failed to execute client-agent"
+        sys.exit(1)
+
+    # if client-agent opens a connection and finds a DR, then we don't expect it
+    # to exit until we kill it, but if it fails to create a tunnel it will exit
+    # quickly.  Therefore we pause and poll the process to see whether it's
+    # still alive; if so we assume that it's going to live (so we'll need to
+    # kill it later)
+
+    from twisted.internet import reactor
+    from twisted.internet.task import LoopingCall
+
+    def check_client_agent():
+        exit_code = ct.poll()
+        if exit_code != None:
+            if exit_code == 4:
+                print 'ERROR: no DR found for host %s' % decoy_host
+            else:
+                print 'ERROR: lost connection to %s' % decoy_host
+
+            try:
+                reactor.stop()
+            except:
+                print "curveball-client.check_client_agent: reactor already stopped"
+
+    time.sleep(0.1)#2) # TODO: this is just a guesstimate of the right poll delay.
+
+    exit_code = ct.poll()
+    if exit_code == None:
+        atexit.register(kill_client_agent)
+        watch_client_agent = LoopingCall(check_client_agent)
+        watch_client_agent.start(AGENT_POLL_INTERVAL)
+        return ct
+    elif exit_code == 4: # TODO: magic value
+        print "WARNING: No DR found for host %s" % (decoy_host,)
+        # TODO: do we need to call ct.wait()?
+        return None
+    else:
+        print "ERROR: Can't connect to %s" % (decoy_host,)
+        # TODO: do we need to call ct.wait()?
+        return None
+
+def start_cbsmd(opts):
+    """
+    Start the cbsmd server
+
+    NOTE: curveball-client kills all of its descendants in atexit,
+    so it's important that cbsmd have a way to persistently
+    record its state -- otherwise it will start over from
+    scratch each time.
+    """
+
+    path = os.path.join(DIRNAME, 'cbsmd')
+    cmd = [path]
+
+    if isAndroid:
+	pythonexe = os.path.join(sys.prefix, "bin/python")
+	cmd = [pythonexe] + cmd
+
+    try:
+        _proc = subprocess.Popen(cmd, close_fds=True)
+
+        # It takes a moment for the cbsmd to get settled.  The guess is
+        # 1 second.  FIXME: It should be a poll instead.
+        #
+        time.sleep(0.1)#1)
+    except BaseException, exc:
+        print type(exc)
+        print str(exc)
+
+    return True
+
+def get_sentinel_ss(use_real_sentinels):
+    """
+    Use a "self-serve" version of cbsmd.
+
+    If use_real_sentinels is False, then return the debugging
+    sentinel.
+
+    If use_real_sentinels is True, then try to use the self-serve
+    sentinel manager, which requires a key to have been setup already.
+    Fail if there are no sentinels available (for any reason).
+    """
+
+    if not use_real_sentinels:
+        return ('05f4ca326014f56664c5044bcf35f932' +
+                'b404578034728de4c80435f7bd777f81')
+
+    try:
+        (sentinel, epoch, remaining) = SentmanSelfServe.generate()
+    except IOError, exc:
+        print 'ERROR: cannot access keystate file: %s' % str(exc)
+        return None
+    except BaseException, exc:
+        print 'ERROR: %s' % str(exc)
+        return None
+
+    if sentinel:
+        return sentinel
+    elif not remaining:
+        print "ERROR: no sentinels remaining in this epoch"
+        return None
+    else:
+        print "ERROR: failed to allocate sentinel"
+        return None
+
+def init_client(opts, proxy_addr, decoy_addrs):
+    from cb.ccp.ccp import CCPMessage
+    from cb.ccp.ccp_client import CCPClient
+
+    if opts.http:
+        if opts.unidirectional:
+            from cb.ct.httpuni.HTTP_CT_UNI_Client import HTTPCTUniClient
+        else:
+            from cb.ct.http.HTTP_CT_Client import HTTPCTClient
+
+    if opts.vpn:
+        from cb.vpn.client import VpnClient
+        from cb.vpn.client import VpnClientState
+        from cb.vpn.client import WinVpnClient
+
+        # We need sudo or equivalent to change the routing and the TUN
+        # on UNIX and UNIX-like platforms, so gripe and exit if we don't
+        # have it.
+        #
+        # On Windows, the user needs to be in the admin group, but it's
+        # unclear how to reliably determine this.
+        #
+        # TODO: fix for win7, win8.
+        #
+        if PLATFORM in ['android', 'linux2', 'darwin']:
+            if os.geteuid() != 0:
+                if PLATFORM == 'android':
+                    # TODO: warn the user with a dialog on Android
+                    pass
+                else:
+                    print 'ERROR: VPN mode requires root or sudo'
+                sys.exit(1)
+
+        print "Covert subnets = %s" % (str(opts.covert_subnets),)
+
+    tunnel_addr = ('localhost', opts.tunnel_port)
+    
+    # try all the decoy_addrs, until one works or we run out.
+    for decoy_addr in decoy_addrs:
+        sentinel = get_sentinel_ss(opts.crypto)
+        if not sentinel:
+            print 'ERROR: Could not allocate sentinel'
+            sys.exit(1)
+
+        # TODO: check that the sentinel is good
+
+        if opts.http:
+            if opts.unidirectional:
+                agent = HTTPCTUniClient((decoy_addr[0], decoy_addr[1]),
+                                        opts.tunnel_port, opts.crypto, sentinel)
+
+            else:
+                agent = HTTPCTClient((decoy_addr[0], decoy_addr[1]),
+                                     opts.tunnel_port, opts.crypto, sentinel)
+        else:
+            agent = run_client_agent(decoy_addr[0], decoy_addr[1],
+                                     opts.tunnel_port, opts.crypto,
+                                     sentinel, opts.unidirectional,
+                                     opts.use_srcaddr)
+
+        # If we're in probe mode, then try all of the candidate decoy hosts
+        # and print the name of each successful decoy host.
+        #
+        # If we're not in probe mode, stop as soon as we find a decoy host.
+        #
+        if opts.probe_only:
+            if agent:
+                print "DECOY_HOST: %s" % decoy_addr[0]
+        else:
+            if not agent:
+                print "Failed to connect to %s" % (str(decoy_addr),)
+            else:
+                # print "Connected to %s:%d" % (decoy_addr[0], decoy_addr[1])
+                break
+
+    # If we're in probe-only mode, then we're finished after we've
+    # probed every candidate.
+    #
+    # Otherwise, start set up the proxy and enter the main loop.
+    #
+    if opts.probe_only:
+        return(0)
+
+    if agent == None:
+        print "ERROR: No agent succeeded."
+        sys.exit(1)
+
+    if opts.vpn:
+        conn_type = CCPMessage.OPEN_CVPN_CONN
+    else:
+        debug("Starting proxy")
+        conn_type = CCPMessage.OPEN_SOCKS5_CONN
+
+
+    tunnel_type = None
+    if opts.http:
+        if opts.unidirectional:
+            tunnel_type = 'http-uni'
+        else:
+            tunnel_type = 'http-bi'
+    else:
+        if opts.unidirectional:
+            tunnel_type = 'tls-uni'
+        else:
+            tunnel_type = 'tls-bi'
+
+    ccp_client = CCPClient(proxy_addr, tunnel_addr, tunnel_type, sentinel,
+                           False, conn_type=conn_type)
+
+    if opts.vpn:
+
+        # pin the route to the decoy host.
+	if PLATFORM == 'win32':
+	    import cb.util.winpin
+	    cb.util.winpin.win_pin_routes(
+		    [socket.gethostbyname(decoy_addr[0])])
+        elif PLATFORM == 'android':
+	    cmd = 'su -c "/system/xbin/sh %s %s"' % (
+                    os.path.join(DIRNAME, 'curveball-pin-route'),
+		    socket.gethostbyname(decoy_addr[0]))
+	    os.system(cmd)
+	else:
+	    cmd = '/usr/bin/sudo %s %s' % (
+                    os.path.join(DIRNAME, 'curveball-pin-route'),
+		    socket.gethostbyname(decoy_addr[0]))
+	    os.system(cmd)
+
+        # The default route is set through the tunnel
+        #
+        print "CREATING VPN"
+
+	if sys.platform == 'win32':
+	    vpn_client = WinVpnClient(proxy_addr,
+                    opts.vpn_default, opts.covert_subnets,
+		    no_covert_dns=opts.no_covert_dns)
+	else:
+	    vpn_client = VpnClient(proxy_addr,
+                    opts.vpn_default, opts.covert_subnets,
+		    no_covert_dns=opts.no_covert_dns)
+
+    if isAndroid:
+        droidCallback = lambda args: droid.curveballStarted()
+        ccp_client.signals.register('CT_CONNECTED', droidCallback)
+
+    ccp_client.signals.register('CT_CONNECTED', connected_callback)
+
+    # Need to make sure that anything that happens in the reactor
+    # doesn't cause us to exit without restoring the DNS state, if
+    # necessary
+
+    from twisted.internet import reactor
+    import cb.util.twisted_exit
+
+    if opts.auto_stop_time > 0:
+        from twisted.internet.task import LoopingCall
+
+        def auto_stop_callback():
+            print 'Stop by request after %.2f seconds' % opts.auto_stop_time
+            reactor.stop()
+
+        auto_stop_loop = LoopingCall(auto_stop_callback)
+        auto_stop_loop.start(opts.auto_stop_time, now=False)
+
+    status = cb.util.twisted_exit.run(reactor, do_exit=False)
+
+    if opts.vpn:
+        VpnClientState.DNS.restore_state()
+
+    # The status returned from twisted is often bogus, so don't
+    # rely on it.  Look at whether CONNECTED is set.
+    #
+    if status == 0:
+        global CONNECTED
+
+        if CONNECTED:
+            print 'Curveball client exited'
+        else:
+            print 'Curveball client failed to connect'
+    else:
+        print 'Curveball client failed'
+
+    sys.exit(status)
+
+def main():
+    (opts, proxy_addr, decoy_addrs) = parse_args(sys.argv)
+
+    if opts.remora:
+        try:
+            decoy_addr = remora_simple_request(opts.remora_port)
+        except BaseException, exc:
+            print 'ERROR: %s' % str(exc)
+            sys.exit(1)
+
+        if not decoy_addr:
+            print 'Error: Remora failed to provide a decoy'
+            sys.exit(1)
+        else:
+            print 'Remora provided decoy %s' % str(decoy_addr)
+
+        # this is the DETER-specific code:
+        """
+        try:
+            (decoy_name, decoy_aliases, decoy_addrs) = socket.gethostbyaddr(decoy_addr[0])
+
+            # THIS HEURISTIC IS ONLY FOR DETER AND HOW WE BUILD EXPERIMENTS
+            #
+            # It makes terrible assumptions for the real world
+            #
+            if len(decoy_aliases) > 0:
+                decoy_host = decoy_aliases[-1]
+            else:
+                decoy_host = decoy_name
+
+        except BaseException, exc:
+            print 'Unusable host returned from remora [%s]: %s' % (
+                    decoy_addr[0], str(exc))
+            sys.exit(1)
+        """
+
+        # on the Internet, we don't have to do tricks to find
+        # the decoy host
+        #
+        decoy_host = decoy_addr[0]
+        decoy_port = int(decoy_addr[1])
+        if decoy_port == 443:
+            opts.http = False
+        elif decoy_port == 80:
+            opts.http = True
+            # uni works more often than bi for http
+            opts.unidirectional = True
+        else:
+            print 'Error: Remora reported invalid decoy port %d' % decoy_port
+            sys.exit(1)
+
+        print 'Trying decoy (\'%s\', %d)' % (decoy_host, decoy_port)
+        decoy_addrs = list([ (decoy_host, decoy_port) ])
+
+    if not opts.gui:
+        init_client(opts, proxy_addr, decoy_addrs)
+    else:
+        print 'Starting the GUI'
+        import cb.gui.client.client_gui
+        cb.gui.client.client_gui.init()
+
+if __name__ == '__main__':
+    main()

@@ -1,0 +1,166 @@
+#!/usr/bin/env python
+#
+# This material is based upon work supported by the Defense Advanced
+# Research Projects Agency under Contract No. N66001-11-C-4017.
+#
+# Copyright 2014 - Raytheon BBN Technologies Corp.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or
+# implied.  See the License for the specific language governing
+# permissions and limitations under the License.
+
+
+# Wrapper for cbnoc-dhblacklist and cbnoc-push-baddh*
+#
+# Figures out which tools to run depending on the environment.
+
+"""
+Wrapper to create and push Decoy Host Blacklist files
+"""
+
+import os.path
+import re
+import subprocess
+import sys
+
+from optparse import OptionParser
+
+# The directory that this executable lives in.
+#
+DIRNAME = os.path.normpath(
+        os.path.abspath(os.path.dirname(sys.argv[0]) or '.'))
+
+sys.path.append(os.path.normpath(os.path.join(DIRNAME, '..', 'python')))
+
+import cb.noc.file
+
+
+def parse_args(argv):
+    """
+    Fetch parameters from the commandline
+    """
+
+    default_outdir = './out'
+
+    parser = OptionParser("Usage: %prog [options] BLACKLISTFILE")
+
+    parser.add_option('-C', '--local-pusher', dest='local_pusher',
+            action='store_true', default=False,
+            help='Use local pusher')
+
+    parser.add_option('-o', '--outdir', dest='outdir',
+            type=str, default=default_outdir, metavar='PATH',
+            help='Scratch directory for created files [default=%default]')
+
+    (options, args) = parser.parse_args(argv)
+
+    if len(args) != 1:
+        print 'ERROR: bad command line'
+        parser.print_help()
+        sys.exit(1)
+
+    blacklist_file = args[0]
+
+    if not os.access(blacklist_file, os.R_OK):
+        print 'ERROR: blacklist file (%s) cannot be read!' % (blacklist_file)
+        sys.exit(1)
+
+    return (options, blacklist_file)
+
+def local_pusher(my_dir, options):
+    """
+    Push the files to the proper locations on the local machine
+    """
+
+    print 'Pushing to local node...'
+
+    cmd = '%s %s' % (
+            os.path.join(my_dir, 'cbnoc-push-baddh-loc'),
+            options.outdir)
+    # print cmd
+
+    return os.system(cmd)
+
+def remote_pusher(my_dir, options):
+    """
+    Push the newly-created files (and any other files in outdir)
+    to the remote hosts
+    """
+
+    print 'Pushing to remote nodes...'
+
+    cmd = '%s %s' % (
+            os.path.join(my_dir, 'cbnoc-push-baddh-rem'),
+            options.outdir)
+
+    # the pusher doesn't run properly as root on EARS,
+    # so if we're running as root then sudo back to the
+    # original user for this command.
+    #
+    # Yuck.
+    #
+    orig_user = os.getenv('SUDO_USER', None)
+    if orig_user:
+        cmd = '/usr/bin/sudo -u "%s" %s' % (orig_user, cmd)
+
+    return os.system(cmd)
+
+if __name__ == '__main__':
+
+    def main(argv):
+        """
+        Create and push a decoy host blacklist, based
+        on the given parameters
+        """
+
+        (options, in_fname) = parse_args(argv[1:])
+
+        (my_dir, _my_name) = os.path.split(argv[0])
+
+        hostname_proc = subprocess.Popen(['/bin/hostname'],
+                stdout=subprocess.PIPE)
+        hostname = hostname_proc.communicate()[0]
+
+        ps_proc = subprocess.Popen(['ps', 'axu'],
+                stdout=subprocess.PIPE)
+        ps_out = ps_proc.communicate()[0]
+
+        if options.local_pusher:
+            pusher = local_pusher
+        elif re.search(' /tmp/pycore.', ps_out):
+            pusher = local_pusher
+        else:
+            pusher = remote_pusher
+
+        if not os.path.isdir(options.outdir):
+            os.mkdir(options.outdir)
+
+        out_basename = cb.noc.file.bdh_name()
+        out_fname = os.path.join(options.outdir, out_basename)
+
+        creator = os.path.join(my_dir, 'cbnoc-dhblacklist')
+        cmd = "%s %s %s" % (creator, in_fname, out_fname)
+
+        code = os.system(cmd)
+        if code:
+            print 'ERROR: blacklist compilation failed'
+            return 1
+
+        print 'Pushing new configurations'
+
+        code = pusher(my_dir, options)
+        if code:
+            print 'ERROR: pusher failed.'
+
+        return code
+
+    exit(main(sys.argv))
+

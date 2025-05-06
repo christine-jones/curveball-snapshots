@@ -1,0 +1,243 @@
+<html>
+  <head>
+    <title>BBN Curveball and Quilting - version 2017.05.23 </title>
+  </head>
+  <body>
+    <h1>BBN Curveball and Quilting - version 2017.05.23 </h1>
+
+    <p>
+    This document describes how to run BBN Curveball,
+    after it has been installed,
+    on Ubuntu 12.04,
+    with the <tt>quilt-client</tt> and <tt>quilt-server</tt>.
+    </p>
+
+    <h2> Background and terminology </h2>
+
+    <p>
+    A "quilt" is a single BBN Curveball connection constructed from one or more
+    connections, such as BBN Curveball connections [0].  A quilt can be constructed
+    from any combination of multiple concurrent or sequential connections.  The
+    connections may appear (to the RAT) to be between the client and multiple
+    decoys, and to use multiple protocols.
+    </p>
+
+    <p>
+    The quilt software consists of two applications:
+    </p>
+
+    <dl>
+	<dt> <tt> quilt-client </tt> </dt>
+
+	<dd> <p> The quilt-client is the client software
+	that runs on the client host.
+	It provides a SOCKS proxy [1]. </p>  </dd>
+
+	<dt> <tt>  quilt-server </tt> </dt>
+
+	<dd> <p> The quilt-server is a server that runs
+	    on the quilt host somewhere on the network beyond the control
+	    of any adversary trying to monitor the quilt.
+	    The <tt>quilt-server</tt> implements the backend
+	    of the quilt protocol, and uses a local SOCKS proxy
+	    (<tt>danted</tt>)
+	    on the quilt host to proxy the requests from the quilt clients.
+
+    </dl>
+
+    <h2> Running the software </h2>
+
+    <p>
+    Note that the order in which the software is started matters.
+    </p>
+
+    <p>
+    These steps must be done <i>after</i>
+    <a href="installing-curveball.htm">installing BBN Curveball</a>
+    and after the DR and DP servers have been started, and after
+    the HTTP/HTTPS servers have been started
+    on the decoy and covert hosts,
+    as described in the instructions for 
+    <a href="running-curveball.htm">running BBN Curveball</a>.
+    </p>
+
+
+    <ol>
+
+	<li> On the quilt host, start <tt>quilt-server</tt>
+
+<pre>
+sudo /opt/curveball/scripts/quilt-server
+</pre>
+
+	    <p>
+	    The quilt-server commandline options are similar to those
+	    for <tt>cb-dp</tt>.  It is particularly important to make
+	    sure that the <tt>--permitted-subnet</tt> and <tt>--outbound-dev</tt>
+	    parameters are chosen correctly.
+	    </p>
+	    
+	</li>
+
+	<li> On the client host, start <tt>quilt-client</tt>
+
+<pre>
+sudo /opt/curveball/scripts/quilt-client
+</pre>
+
+
+	    <p>
+	    The <tt>quilt-client</tt> commandline parameters are
+	    described below.
+	    </p>
+
+	    <p>
+	    Note <tt>curveball-client</tt> and <tt>quilt-client</tt>
+	    MUST NOT be run at the same time on the same client [1]. 
+
+	</li>
+
+    </ol>
+
+
+    <h2> <tt>quilt-client</tt> parameters </h2>
+
+
+    <dl>
+	<dt> -d DECOY:PROTOCOL,... </dt>
+
+	<dd>
+	    <p> A comma-separated list of decoy hosts and the protocols to
+		use to reach them.  For example: </p>
+
+<pre>
+-d decoy0:https,decoy1:https,decoy0:http,decoy2:http-uni
+</pre>
+
+	    <p> means that the quilt should use decoy0 via HTTP and HTTPS,
+	    decoy1 only via HTTPS, and decoy2 only via HTTP-UNI. </p>
+
+	    <p>
+	    Quilting can also use non-Curveball tunnels; for example
+	    </p>
+
+<pre>
+-d quilt:sock
+</pre>
+
+	    <p> means that the quilt should connect directly via a socket
+	    the quilt host, rather than using Curveball. </p>
+
+	</dd>
+
+	<dt> --quilt-host QUILTHOST </dt>
+
+	<dd>
+
+	    <p> QUILTHOST is the name of the host on which the quilt-server
+		is running.  The default is "quilt". </p>
+
+	</dd>
+
+	<dt> -l LEVEL </dt>
+
+	<dd>
+	    <p> The logging level to use for diagnostic messages.
+	    If set to 0, all logging is disabled.  The lowest level
+	    (most verbose) is 1; the highest level (critical errors
+	    only) is 5. </p>
+	</dd>
+
+	<dt> --chan-count COUNT </dt>
+
+	<dd>
+	    <p> The number of concurrent channels that the quilt should
+	    try to keep open at the same time.  If the requested
+	    number of concurrent channels is larger than the number
+	    of decoy host/protocol pairs specified with the -d option,
+	    the quilt-client will refuse to start.  To specify that
+	    quilting is permitted to open more than one connection
+	    using the same decoy and protocol, include this host/protocol
+	    pair more than once in the -d option.
+	    </p>
+	</dd>
+
+	<dt> --chan-lifespan SECONDS </dt>
+
+	<dd>
+	    <p> The number of seconds that each channel is permitted to
+	    live before it is closed.  </p>
+	</dd>
+
+    </dl>
+
+    <p>
+    Note: If the quilt server crashes or is blocked, paused, or stopped for any
+    reason the quilt client will become unresponsive.  The quilt client cannot
+    distinguish between a quilt server that is crashed or dead from one that is
+    unresponsive, and therefore lets the user decide whether or not to quit.
+    </p>
+
+    <h2> Creating new channels </h2>
+
+    <p> The quilting architecture permits new channels to be developed and
+    added to <tt>quilt-client</tt> and <tt>quilt-server</tt> in order to
+    support new connection types (for example, Tor or SONATA).
+    These new channels can also implement different traffic patterns,
+    for example to mimic web browsing, or video streaming, or VOIP. </p>
+    
+    <p> A key property of the architecture is that the individual channels
+    are autonomous, and decide when to send data and control messages
+    (including sending padding when there is no application traffic
+    to send). </p>
+
+    <p>
+    The current version of quilting does not illustrate this feature: it only
+    provides one default channel, with the following behavior:
+    <p>
+
+    <ol>
+
+	<li> Data is sent when it is available.  Chaff and padding are not used. </li>
+
+	<li> Control messages are sent periodically, at a fairly high frequency,
+	in order to keep the endpoints in sync. </li>
+
+	<li> Channels die as soon as they have been established for <tt>chan-lifespan</tt>
+	seconds (as specified on the commandline) </li>
+
+    </ol>
+
+    <h2> Notes </h2>
+
+    <dl>
+
+	<dt> [0] </dt>
+	
+	<dd> A single BBN Curveball connection can be used to proxy any reasonable number of
+	SOCKS connections, or a VPN.  A single quilt may be used by the client to
+	concurrently access multiple covert hosts, using multiple protocols, via
+	multiple sockets.
+	</dd>
+
+	<dt> [1] </dt>
+	
+	<dd> By default, both curveball-client and quilt-client use the same same ports
+	for some operations, so they cannot be run at the same time.  It is
+	possible to run both (or more than one curveball-client and quilt-client
+	concurrently on the same host) by specifying different ports on the
+	commandline, but this is not recommended. </dd>
+
+    </dl>
+
+    <h2> Acknowledgements </h2>
+
+    <p>
+    This product includes
+    software developed in part by support from the
+    Defense Advanced Research Project Agency (DARPA)
+    Contract No. N66001-11-C-4017.
+    </p>
+
+  </body>
+</html>

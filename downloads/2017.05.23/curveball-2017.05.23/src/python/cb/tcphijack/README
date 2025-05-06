@@ -1,0 +1,30 @@
+A brief overview of addresses (taken from the same connection):
+
+--------------------------------------------------------
+Dante Proxy host address
+  internal: 127.0.0.1 port = 1080
+  external: 10.0.5.10
+
+Client address that ccp_dp sees
+('127.0.0.1', 37420)
+
+--------------------------------------------------------
+Contents of flowtable in connection_monitor.py
+
+monitor.hijack.hijack_tuple (this is the nat'ed address)
+('10.100.128.1', 1124, '10.100.0.1', 80)
+
+hijack_tuple (what is passed to cm_close_callback by HTTP_CT_DP)
+('10.100.128.1',  1124)
+
+monitor.flow_tuple: This is the flow tuple that the DR uses
+This also contains the actual client and decoy0 address in the core topology
+('10.0.0.10', 33492, '10.0.20.10', 80) : 
+ 
+--------------------------------------------------------
+DR flowtable contents
+
+monitor.flow_tuple: this is the flow tuple that the DR uses
+('10.0.0.10', 33492, '10.0.20.10', 80)
+
+--------------------------------------------------------

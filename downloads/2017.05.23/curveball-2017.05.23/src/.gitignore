@@ -1,0 +1,11 @@
+click/curveball/*.ko
+click/curveball/*.ko.cmd
+click/curveball/*.ud
+click/curveball/*.uo
+click/curveball/config.log
+click/curveball/config.status
+openssl/*/crypto/*/lib
+openssl/*/test/*test
+*.log
+*.log.1
+*/Linux2.6_x86_glibc*/*

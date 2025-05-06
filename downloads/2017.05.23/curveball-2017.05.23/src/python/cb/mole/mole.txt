@@ -1,0 +1,332 @@
+The Mole Tunnel
+
+========
+OVERVIEW
+
+The Mole Tunnel is intended to be used in an environment where
+unidirectional routes (routes whose forward paths from client to DH
+traverse the DR, but whose backward path from DH to client do not
+traverse the DR) are prevalent.  It can be used in other cases, but it
+has relatively poor performance and identifiable fingerprint make it
+less desirable than other tunnels when bidirectional routes are
+available.
+
+The Mole Tunnel uses "bogus" messages to the the DH that provoke error
+responses that convey information from the hidden host and/or the
+Curveball infrastructure to the client.
+
+As a simple example, let "X" be the message that the CH wishes to send
+to the client, using an established Curveball tunnel between the client
+and a decoy host (DH).  In this example, we will assume that the DH is
+an HTTP server; the client connection may be either an ordinary socket
+or an SSL connection.  (we will not discuss encryption in the case of
+SSL, although it is implied)
+
+1.  The client sends packets to the DH.
+
+2.  The DR intercepts the message from the client to the DH, and
+    forwards these packets to the DP as normal.
+
+3.  The DP creates a message that encodes "X" (using a notation that
+    will be described later) and that is a valid HTTP request that will
+    provoke a response from the DH that will contain a representation of
+    "X" that the client can decode.
+
+    For example, the message might be a GET request:
+
+	GET /mumble/X HTTP/1.1
+	Host: DH
+
+    If the DH does not have resource named "mumble/X", then it will
+    return an error page, and these error pages often include the URL
+    that provoked the error.
+
+4.  For each client->DH packet that the DP received in step 2, it
+    replaces the packet data with the corresponding bytes of the
+    encoded message created in step 3, recomputes the checksum
+    of the packet, and sends it back to the DR to be forwarded to
+    the DH.
+    
+    There are many edge cases that must be addressed (for example, if
+    the formatted message is a different length than the space available
+    in the packets, or the packets arrive out of order, etc).  These are
+    addressed below.
+
+5.  The DH receives the request, but cannot satisfy it.  It returns an
+    error code (usually 404, 301, or 302) and a page listing the URL
+    that provoked the error ("/mumble/X").
+
+6.  The client receives the page from the DH, and parses the page,
+    retrieving the message "X".
+
+Not all DHs will respond with error pages in the format that we require,
+but we assume that the client will be able to find a DH with the
+necessary properties.
+
+We also require that the client know (or learn) the general parameters
+of the messages that the CH will wish to send to the client.  Every
+packet from the DP to the DH must correspond to a packet of the same
+size from the client to the DH (via the DP), and the messages from the
+CH to the client grow during encoding, so in order for the client to
+receive a message of length L from the CH, it might have to send many
+more than L bytes to the DH.
+
+The DP can encode hints to the client, alongside the data from the CHs,
+about whether the client is falling behind and it should send more
+packets in order to provide the DP with a way to send more data back to
+the client.
+
+========
+DESIGN
+
+====
+Changes to the DR
+
+After a flow is hijacked, the DR must be modified to pass all DH->client
+traffic from that flow through unmodified.
+
+    If the route is unidirectional, then the DR will not see any such
+    traffic, but if it is bidirectional, the DR will.  In no case,
+    however, must the DR do anything with any DH->client traffic.
+
+====
+Changes to the DP
+
+All client->DH packets for hijacked flows are sent to the DP before
+forwarding to the DH; packets that contain data must not be forwarded
+unaltered, because the app-level content of the flow is changed and if
+packets are passed through unaltered the DH (which is oblivious to the
+Curveball protocol) will detect an HTTP-level protocol error (and is
+likely to drop the connection).
+
+When a flow is hijacked in unidirectional mode, an instance of the
+MoleTunnel class is created to encapsulate the state of the tunnel.
+This class is described below.
+
+
+====
+MoleTunnel
+
+    This section describes the MoleTunnel class.
+
+    The purpose of a MoleTunnel instance is to translate an incoming CCP
+    stream into outgoing TCP packets.
+
+    This description does not consider multi-flow.  I have assumed that
+    the multi-flow protocol is implemented above CCP, and that this
+    class does not need to interact with higher levels of the protocol.
+    If this abstraction is incorrect, some redesign may be necessary.
+
+    Locking/synchronization of the shared data structures is not defined
+    here, but is assumed to be done with a defined lock order (to
+    prevent deadlock).
+
+    The state of the communication from CCP to the client is represented
+    by two queues, described in the Members section below.  At any
+    moment, each byte in the original CCP byte stream is represented by
+    some encoding of information in at most one one of these queues.
+    After a receipt of a segment of data has been acknowledged, then it
+    may be discarded.
+
+    Along with each of these queues (or possibly as part a member of
+    each queue itself) there will be information stored about the
+    current offset (relative to the start of the CCP byte stream or
+    initial TCP sequence number) of the head and tail of the queue.
+
+    Along with each of these queues (or possibly as part a member of
+    each queue itself) there will be information stored about the
+    current offset (relative to the start of the CCP byte stream or
+    initial TCP sequence number) of the head and tail of the queue.
+
+    The flow of a byte that arrives from CCP is as follows: first, the
+    byte is appended to ccp_unencoded.  At some later time, in response
+    to events described below, the byte is dequeued from ccp_unencoded
+    (usually along with sequence of other bytes), encoded in the Mole
+    Tunnel Format, and the result of the encoding is appended to member
+    encoded_pending.  At some later time, when the receipt of the byte
+    by the client has been acknowledged, the encoded form of the byte
+    (and rest of the acknowledged bytes) are dequeued from
+    encoded_pending and discarded.
+
+    Members:
+
+    member ccp_unencoded: a ByteQueue representing bytes that have been
+        received from CCP, but have not been processed in any other way.
+        This is strictly a first-in, first-out queue.
+
+    member encoded_pending: a ByteQueue representing the bytes in the
+        CCP stream that have been encoded in the Mole Tunnel format but
+        that have been encoded to be sent to the DH in client->DH
+        packets, and have not yet been acknowledged.
+
+        Sequences of bytes are dequeued from ccp_unencoded, encoded into
+        Mole Tunnel format, and then enqueued in this queue.  This queue
+        is also strictly first-in, first-out, but the coding process
+        depends on dynamic parameters (primarily the characteristics of
+        the packets arriving from the Client, addressed to the DH) and
+        therefore it is done lazily, at the last possible moment, so
+        that the parameters are up-to-date.
+        
+        Bytes can be dequeued and discarded from the head of this
+        queue when an acknowledgment for them has been observed.
+
+    Methods:
+
+    method enqueue(new_content): append the given new_content to
+        ccp_unencoded
+
+        This method is invoked when new data is received from the CCP
+        protocol.
+
+    method extend(last_offset): extend encoded_pending by encoding data
+        from ccp_unencoded, until the last offset in encoded_pending is
+        greater than or equal to last_offset.  If there is not enough
+        data in ccp_unencoded for the encoded data to reach last_offset,
+        then chaff (filler) is encoded and the result is appended to
+        encoded_pending until the last offset in encoded_pending is
+        greater than or equal to last_offset.
+
+        Note that the encoding method includes a mechanism for
+        distinguishing chaff from other data; the chaff is discarded
+        automatically when the stream is decoded.
+
+    method copy(first_offset, last_offset): return a copy of the bytes
+        in encoded_pending in the given range of offsets.
+
+        If any bytes in the range from first_offset to last_offset are
+        undefined (have not yet been encoded, or have already been
+        discarded) then corresponding bytes are undefined and filled
+        with zero.
+
+    method mark_acked(last_offset): mark all of the bytes up to the
+        given last_offset as acknowledged, discarding them from
+        encoded_pending.
+
+====
+
+When a Client->DH packet is received by the DP, it must immediately
+forward a corresponding packet to the DH.  The contents of the original
+packet are copied to new packets, altered so that they are delivered
+locally, and interpreted as a TCP flow representing CCP traffic from the
+Client.  These packets are then reused in to represent the contents of
+CCP traffic to the client, using Mole Tunnel Encoding, as described
+below.
+
+The TCP data from the packet is replaced with mole-encoded data from the
+head of the encoded_pending queue.  If there is not enough data present
+in encoded_pending to fill the packet, but there is data pending in
+ccp_unencoded, then data in ccp_unencoded is dequeued, encoded, and
+moved to encoded_pending until there is enough.  If the data in
+ccp_unencoded is exhausted before the packet can be filled, then encoded
+chaff is added until the packet is filled.
+        
+As described earlier, we do not aggressively encode data pending in
+ccp_unencoded and move it to encoded_pending as soon as we can, but
+instead encode as little CCP data as possible in order to fill the
+packets we have received.
+
+method push_to_dh
+
+    This method is called whenever a client->DH packet for this flow
+    arrives from the DR.
+
+    0.  A copy of the packet is forwarded to the local tunnel, where it
+        will be rewritten with a local destination address and injected
+        into the local stack.  This is the same (and only) step done for
+        the non-mole tunnels, except that the packet must be copied so
+        that the destructive changes to the packet to cause it to be
+        delivered locally do not impact the rest of this procedure.
+
+        One essential difference between this and the ordinary tunnels:
+        the connection must not be literally terminated locally: *no*
+        packets for this connection can be sourced by the DP except for
+        the packets synthesized (in a one-to-one manner) from packets
+        that are received by the DP.  The DP MUST NOT acknowledge
+        packets, respond to FINs, etc on the client->DH path.  The DP
+        must not terminate these connections.
+
+        NOTE:  packets emitted from the local tunnel (which would
+        ordinarily be forwarded to the client) must be squashed.  They
+        must NEVER be forwarded.
+
+    1.  If the packet does not contain data, then forward it to the DH
+        and return.
+
+    2.  The packet contains data, handle special cases:
+
+        - If all of the data in the packet has been acknowledged
+            already, then drop the packet.
+
+        - If the packet is a re-send of data already sent (but not
+            acknowledged), then continue.
+
+        - If the packet contains data at an offset is greater than the
+            end of encoded_pending, extend encoded_pending until it
+            is long enough.
+
+    3.  Copy the data from encoded_pending needed to replace the
+        contents of the packet.  Recompute the checksum for the packet
+        and send the packet to the DR.
+
+        Note that we do not just send the "next" bytes.  The offset in
+        the packet must match during reassembly, so when we see a
+        client->DH packet with a base offset of 50 and a length of 1,
+        then we must fill it with byte 50 of the encoded CH->client
+        stream, even if we haven't sent byte 49 yet.
+
+======== DISCUSSION
+
+(added 8/17/2013 -- needs revision)
+
+This is a high-level summary of how I think this can be bolted onto the
+DP, which some digressions because I'm short on time and haven't
+organized my thoughts completely.
+
+The guiding principle of this design is that packets that arrive on the
+client->DH direction of a "hijacked" connection are always forwarded
+immediately, or at least without any blocking.  If there are data ready
+to insert into data packets, this data is immediately copied into these
+packets; if there is not enough data pending to fill the packets, new
+"chaff" data is created, on-the-fly if necessary, to fill the packets.
+
+When a client->DH packet for a Curveball flow arrives at the DP:
+
+1. A copy of the packet is made.  The original is denoted as PACKET, and
+    the copy is denoted as COPY.
+
+2. COPY is rewritten in the same way as a "traditional" Curveball flow:
+    the src and dst addresses are rewritten as local.
+
+3. COPY is delivered locally, as is normal for a "traditional" Curveball
+    flow.
+
+    Special care is taken to make sure that any responses from the local
+    stack are squashed, rather than reverse-rewritten and forwarded to
+    the client (as would be the case for traditional Curveball).  In the
+    mole tunnel, the DP *never* sends anything directly to the client.
+    The DP only sends packets to the DH.
+
+4. If PACKET contains data, then the data are replaced with mole encoded
+    data from the covert hosts to the client.  The data to encode comes
+    from the CCP tunnel from the DP to the client (unchanged at the CCP
+    layer from the traditional tunnel).
+
+    The encoding is padded with chaff, if necessary, in order to ensure
+    that there is enough of it to fill the current packet *and* the
+    current segment (as we will see in the next step).
+
+5. The TCP checksum of the new TCP packet is computed.
+
+    We need the entire new contents of the packet to be known before we
+    compute the new checksum, and if the packet is fragmented (and
+    particularly if the fragments are delivered out of order) then it is
+    slightly complicated to compute the checksum.  If we have already
+    decided what the contents of all the fragments will be, however, it
+    becomes straightforward.
+
+    The only thing that remains awkward is knowing how far we need to
+    extend the encoded_pending in order to compute the checksum, but
+    fortunately this info is in the header, which we will have when we
+    need to compute the checksum.
+
+6. The modified PACKET is sent to the DR to be forwarded to the DH.

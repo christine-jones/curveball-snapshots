@@ -1,0 +1,80 @@
+#!/bin/sh
+#
+# This material is based upon work supported by the Defense Advanced
+# Research Projects Agency under Contract No. N66001-11-C-4017 and in
+# part by a grant from the United States Department of State.
+# The opinions, findings, and conclusions stated herein are those
+# of the authors and do not necessarily reflect those of the United
+# States Department of State.
+#
+# Copyright 2014-2016 - Raytheon BBN Technologies Corp.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or
+# implied.  See the License for the specific language governing
+# permissions and limitations under the License.
+
+
+# Shutdown Curveball in a simple manner.
+#
+SUDO=/usr/bin/sudo
+PKILL=/usr/bin/pkill
+SLEEP=/bin/sleep
+CBDIR=/opt/curveball
+CBSCRIPTS="${CBDIR}/scripts"
+
+PAUSESECONDS=2
+
+# Rather than trying to do anything fancy like trying to figure out
+# what might be running locally, based on the node name and what is
+# installed, and then killing just that, simply attempt to kill
+# everything that might be running anywhere.  We try to use pkill
+# patterns that probably won't cause too much collateral damage,
+# but we don't try very hard.
+#
+# NOTE: only shuts down things on the local node.  Does NOT shut
+# down everything on every node in the experiment.
+
+# Kill things that run on the DR.
+echo "Killing any DR processes..."
+${SUDO} ${PKILL} -SIGINT -f "python .*cb-dr"
+${SUDO} ${PKILL} -SIGINT -f "click .*fastclick-router.click"
+
+# Kill things that run on the DP.
+echo "Killing any DP processes..."
+${SUDO} ${PKILL} -SIGINT -f "python .*cb-dp"
+
+# Kill things that run on the covert/decoy
+echo "Killing any Decoy/Covert processes..."
+${SUDO} ${PKILL} -SIGINT -f "python .*mini-httpd"
+${SUDO} ${PKILL} -SIGINT -f "python .*echo-server"
+
+# Kill things that run on the quilt server
+echo "Killing any Quilt server processes..."
+${SUDO} ${PKILL} -SIGINT -f "python .*quilt-server"
+
+# Kill things that run on the quilt client
+echo "Killing any Quilt client processes..."
+${SUDO} ${PKILL} -SIGINT -f "python .*quilt-client"
+${SUDO} ${PKILL} -SIGINT -f "python .*ctm"
+
+# Kill things that run on the client
+echo "Killing any Curveball client processes..."
+${SUDO} ${PKILL} -SIGINT -f "python .*curveball-client"
+${SUDO} ${PKILL} -SIGINT -f "client-agent"
+${SUDO} ${PKILL} -SIGINT -f "python .*echo-client"
+
+# After we kill all the processes, pause for a few seconds.
+# We've seen intermittent problems, particularly with the client,
+# if we restart before all the sockets are cleaned up.
+#
+${SLEEP} ${PAUSESECONDS}
+
+exit 0

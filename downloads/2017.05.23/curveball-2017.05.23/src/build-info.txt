@@ -1,0 +1,6 @@
+builduser: dellard
+builddir: /home/dellard/softball/curveball/src/packaging
+hostname: jun
+buildtime: 20170524-0120-UTC
+git-branch: master
+git-commit: a59df960e67cba0f6b95c9529b716fd344923339

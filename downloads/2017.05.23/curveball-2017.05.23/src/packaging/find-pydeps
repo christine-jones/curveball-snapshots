@@ -1,0 +1,133 @@
+#!/usr/bin/env python
+#
+# This material is based upon work supported by the Defense Advanced
+# Research Projects Agency under Contract No. N66001-11-C-4017.
+#
+# Copyright 2014 - Raytheon BBN Technologies Corp.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or
+# implied.  See the License for the specific language governing
+# permissions and limitations under the License.
+
+"""
+A utility to find all of the local dependencies of a Python script.
+
+(Currently ignores system-level dependencies, include non-standard
+packages that have been installed)
+"""
+
+import os
+import re
+import sys
+
+DONE_IMPORTS = set()
+PATHS = sys.path
+
+# For now, we are only interested in things we have source for,
+# but this is limiting.
+#
+SUFFIXES = ['.py']
+
+# We don't care about system libraries, or packages that have been
+# installed by a package manager.  We only care about packages
+# that are local in the sense that they are found outside of
+# the usual install directories.
+#
+IGNORE_PREFIXES = ['/System/', '/opt/', '/usr/local', '/usr/lib']
+
+def process_import(import_name, pending_imports):
+    """
+    Process the given import_name:
+    If it has already been processed, ignore it.
+    Otherwise, find the path to the module.
+    If it is missing, ignore it.
+    Otherwise, if it's a path to a system library, ignore it.
+    Read the file and put all the new imports found into the pending set.
+    """
+
+    if import_name in pending_imports:
+        pending_imports.remove(import_name)
+
+    path = resolve_import(import_name)
+    if not path:
+        return
+
+    for prefix in IGNORE_PREFIXES:
+        if path.startswith(prefix):
+            return
+
+    DONE_IMPORTS.add(import_name)
+
+    rimport_names = find_imports(path)
+
+    for rimport_name in rimport_names:
+        # deflect looping imports
+        if rimport_name == import_name:
+            continue
+
+        if not rimport_name in DONE_IMPORTS:
+            pending_imports.add(rimport_name)
+
+def resolve_import(import_name):
+
+    import_subpath = str.join(os.sep, re.split('\\.', import_name))
+    # print 'import name [%s] subpath: [%s]' % (import_name, import_subpath)
+
+    for dpath in PATHS:
+        candidate_prefix = os.path.join(dpath, import_subpath)
+
+        for suffix in SUFFIXES:
+            candidate = candidate_prefix + suffix
+            if os.path.exists(candidate):
+                # print 'SUCCESS: found [%s] at [%s]' % (import_name, candidate)
+                return candidate
+
+    return None
+
+def find_imports(import_fname):
+    """
+    Find the "import ..." and "from ..." statements in the given
+    filename, and return a list of all the modules referenced.
+
+    TODO: the heuristic for "from ..." lines is weak, but OK as long
+    as people don't try to trick it.
+    """
+
+    fin = open(import_fname)
+    imports = list()
+
+    lines = [ line.strip() for line in fin.readlines() ]
+
+    for line in lines:
+        # Assumes that everyone follow the style guide...
+        # A very dangerous assumption.
+
+        if re.match('import\\s', line):
+            imports.append(re.split(',*\\s+', line)[1])
+        elif re.match('from\\s', line):
+            imports.append(re.split(',*\\s+', line)[1])
+
+    return imports
+
+def main(programs):
+    pending_imports = set()
+
+    for program in programs:
+        pending_imports |= set(find_imports(program))
+
+    while len(pending_imports) != 0:
+        process_import(pending_imports.pop(), pending_imports)
+
+    for name in sorted(DONE_IMPORTS):
+        print '%s %s' % (name, resolve_import(name))
+
+if __name__ == '__main__':
+    main(sys.argv[1:])

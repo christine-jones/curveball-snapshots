@@ -1,0 +1,78 @@
+#!/bin/sh
+#
+# This material is based upon work supported by the Defense Advanced
+# Research Projects Agency under Contract No. N66001-11-C-4017.
+#
+# Copyright 2014 - Raytheon BBN Technologies Corp.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or
+# implied.  See the License for the specific language governing
+# permissions and limitations under the License.
+
+
+# Pushes "Bad Decoy Host" (.bdh) files out to the DRs. 
+# Useful only of local CORE instances; assumes that all
+# the hosts share a file system.
+#
+
+SCRIPTNAME=$(/usr/bin/basename "$0")
+SCRIPTDIR=$(/bin/readlink -f $(/usr/bin/dirname $(/usr/bin/which "$0")))
+
+CP=/bin/cp
+MKDIR=/bin/mkdir
+CLEANUP="${SCRIPTDIR}/cb-noc-cleanup"
+
+BDH_SUFFIX=bdh
+
+DR_BDH_DEST_DIR=/tmp/dr/baddh
+
+if [ $# != 1 ]; then
+    echo "Error: no source directory given"
+    exit 1
+fi
+
+SRCDIR=${1}
+
+if [ ! -d ${SRCDIR} ]; then
+    echo "ERROR: source directory ${SRCDIR} not present"
+    exit 1
+fi
+
+# there might not be a decoy host blacklist, but if we
+# find any, copy them over.
+#
+if /usr/bin/test -n \
+	"$(find ${SRCDIR} -maxdepth 1 -name \
+		'cb-g*'${BDH_SUFFIX} -print -quit)"; then
+    ${MKDIR} -p -m 0755 ${DR_BDH_DEST_DIR}
+    if [ $? -ne 0 ]; then
+	echo "ERROR creating ${DR_BDH_DEST_DIR}"
+	exit 1
+    fi
+
+    ${CP} ${SRCDIR}/*${SENT_BDH_SUFFIX} ${DR_BDH_DEST_DIR}/
+    if [ $? -ne 0 ]; then
+	echo "ERROR copying to ${DR_BDH_DEST_DIR}"
+	exit 1
+    fi
+else
+    echo "No .${BDH_SUFFIX} files found in ${SRCDIR}"
+fi
+
+# Remove any old, out-of-date files
+#
+if [ -x "${CLEANUP}" ]; then
+    "${CLEANUP}" "${DR_BDH_DEST_DIR}" "${SRCDIR}"
+else
+    echo "Warning: the cleaning script is missing"
+fi
+
+exit 0

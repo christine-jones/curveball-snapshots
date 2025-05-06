@@ -1,0 +1,201 @@
+========================================================
+HTTP Handshake and Covert Tunnel
+
+
+---- NOTATION ----
+
+The symbol "+" is used to indicate concatenation
+
+E_X(.)             : Encrypt the information between parentheses using key X.
+				     The encryption block length is 16 bytes.
+
+HMAC_Y(.)          : Create an HMAC for the information between parentheses
+                     using key Y. Output is 32 bytes (using sha256).
+
+Signature_Z(.)     : Sign the information between parentheses using key Z.
+                     Output is 128 bytes.
+
+---- VARIABLES ----
+
+Sentinel           :  8 bytes
+Full_Sentinel      : 64 bytes
+Nonce_Client       : 16 bytes
+Nonce_DP           : 16 bytes
+Premaster          : 32 bytes
+Salt_i             : 16 bytes // i = 1, 2, 3, 4 , ...
+
+Handshake_ID = Sentinel+Nonce_Client
+Handshake_ID       : 24 bytes
+
+Decoupled_ID = Random_String
+Decoupled_ID       : 24 bytes
+
+
+SeqNum_C2D_Rand = Random number
+SeqNum_C2D : 4 bytes
+SeqNum_C2D_Counter = Counter incremented by 1 for each Client message
+SeqNum_C2D = HMAC_Hash_KeyClient( SeqNum_C2D_Rand + SeqNum_C2D_Counter )
+
+SeqNum_D2C_Rand = Random number
+SeqNum_D2C_Rand : 4 bytes
+SeqNum_D2C_Counter = Counter incremented by 1 for each DP message
+SeqNum_D2C = HMAC_Hash_KeyDP( SeqNum_D2C_Rand + SeqNum_D2C_Counter )
+
+
+---- FULL SENTINEL KEY ----
+
+key_x = Full_Sentinel[ 32 hex digits : ]
+iv_x  = Full_Sentinel[ : 32 hex digits ]
+KeyFullSentinel = cssl.aes.CurveballAES256_CBC(key_x, iv_x)
+
+
+---- DP PUBLIC/PRIVATE KEYS ----
+
+KeyDPPub           : DP public key
+KeyDPPriv          : DP private key
+
+
+---- CLIENT AND DP HMACS AND KEYS: COMPUTED FOLLOWING TLS RFC ---
+
+ a = hashlib.sha256( 'A'   + Premaster + Nonce_Client + Nonce_DP ).hexdigest()
+ b = hashlib.sha256( 'BB'  + Premaster + Nonce_Client + Nonce_DP ).hexdigest()
+ c = hashlib.sha256( 'CCC' + Premaster + Nonce_Client + Nonce_DP ).hexdigest()
+aa = hashlib.sha256( Premaster + a ).hexdigest()
+bb = hashlib.sha256( Premaster + b ).hexdigest()
+cc = hashlib.sha256( Premaster + c ).hexdigest()
+Master_Secret = aa + bb + cc
+
+ a = hashlib.sha256( 'A'   + Master_Secret + Nonce_Client + Nonce_DP ).hexdigest()
+ b = hashlib.sha256( 'BB'  + Master_Secret + Nonce_Client + Nonce_DP ).hexdigest()
+ c = hashlib.sha256( 'CCC' + Master_Secret + Nonce_Client + Nonce_DP ).hexdigest()
+aa = hashlib.sha256( Master_Secret + a ).hexdigest()
+bb = hashlib.sha256( Master_Secret + b ).hexdigest()
+cc = hashlib.sha256( Master_Secret + c ).hexdigest()
+Key_Block = aa + bb + cc
+
+mac1 = 32 hex digits         (16 bytes)
+mac2 = mac1 + 32 hex digits  (16 bytes)
+key1 = mac2 + 32 hex digits  (16 bytes)
+key2 = key1 + 32 hex digits  (16 bytes)
+iv1 = key2 + 10 hex digits   ( 5 bytes)
+iv2 =  iv1 + 10 hex digits   ( 5 bytes)
+
+mac_c = Key_Block[0    : mac1]
+mac_d = Key_Block[mac1 : mac2]
+key_c = Key_Block[mac2 : key1]
+key_d = Key_Block[key1 : key2]
+iv_c  = Key_Block[key2 : iv1]
+iv_d  = Key_Block[iv1  : iv2]
+
+HashKeyClient = hashlib.sha256( key_c + Nonce_Client + Nonce_DP ).hexdigest()[0:32 hex digits]
+HashKeyDP     = hashlib.sha256( key_d + Nonce_DP + nonce_Client ).hexdigest()[0:32 hex digits]
+
+KeyClient = cssl.aes.CurveballAES256_CBC( HMAC_Client, iv_c )
+KeyDP     = cssl.aes.CurveballAES256_CBC( HMAC_DP,     iv_d )
+
+
+---- SET-COOKIE INFORMATION ----
+
+SESSIONID          : Decoy host specific
+Domain             : Decoy host specific
+
+
+---- DESIGN GOALS ---
+
+In order for the adversary to impersonate either Curveball
+or a Client, the adversary must have:
+
+(1) Full_Sentinel: this is needed to obtain the Nonce_DP.
+
+(2) KeyDPPriv: this is needed to obtain the Premaster.
+
+
+---- ASSUMPTIONS ----
+
+A decoupled_ID is only valid for the original decoy host contacted
+in the HTTP Request containing the handshake_ID.  This allows
+the replaying of the same cookie (the decoupled_ID), as it is
+always going to the same domain.
+
+We intentionally embed covert information in URLs, creating
+invalid URLs. When the DP receives a request with an invalid
+URL, two cases can arise:
+
+(1) The request comes from a real Curveball Client. In this
+    case Curveball will close the TCP connection with the Decoy Host
+    and send the appropriate fake response and covert data to the
+    Client.
+
+(2) The request comes from an adversary impersonating a Client. In
+    this case, Curveball will do nothing and we assume that the
+    adversary will receive a 404 Error (or possibly another type
+    of error, such as a 414 URL Too Long Error).
+
+
+========================================================
+Messages exchnaged
+
+1) HTTP Request
+
+       Cookie :  SESSSIONID=Handshake_ID
+
+
+2) HTTP Response
+
+   Set-Cookie :  SESSSIONID=Decoupled_ID; Domain=.foo.com; Path=/
+
+      Payload :  Signature_KeyDPPriv( Salt_1     +
+                    			      Nonce_DP   +
+                                      Set-Cookie :  SESSSIONID=Decoupled_ID; Domain=.foo.com; Path=/ +
+                                      Handshake_ID )
+
+				  E_KeyFullSentinel( Salt_1     +
+                                     Nonce_DP ) +
+
+--------------------------------------------------------
+3) HTTP Request:  Client waits to receive full HTTP Response before sending this
+
+          URL :  E_KeyDPPub( Premaster  +
+                             SeqNum_C2D_Rand ) +
+
+              HMAC_KeyDPPub( Premaster         +
+                             SeqNum_C2D_Rand   +
+                  	  	     Decoupled_ID      +
+                             Nonce_DP )
+
+       Cookie :  SESSSIONID=Decoupled_ID
+
+
+4) HTTP Response:  DP hijacks flow when it sees request, does not forward request to DH
+
+      Payload :  HMAC_HashKeyDP( R1 ) +
+                        E_KeyDP( R1 )
+
+	where R1 = Salt_2              +
+	      	   SeqNum_D2C_Rand     +
+	           welcome to curveball
+
+--------------------------------------------------------
+5) HTTP Request
+
+          URL :                SeqNum_C2D +
+        		 HMAC_HashKeyClient( R2 ) +
+        		        E_KeyClient( R2 )
+
+       Cookie :  SESSSIONID=Decoupled_ID
+
+	where R2 = Salt_3       +
+               SeqNum_C2D   +
+               Decoupled_ID +
+               CovertData
+
+
+6) HTTP Response
+
+      Payload :            SeqNum_D2C +
+                 HMAC_HashKeyDP( R3 ) +
+   		                E_KeyDP( R3 )
+
+    where R3 = Salt_4     +
+		       SeqNum_D2C +
+		       CovertData

@@ -1,0 +1,162 @@
+<html>
+  <head>
+    <title>Building BBN Curveball - version 2017.05.23</title>
+  </head>
+  <body>
+    <h1>Building BBN Curveball - version 2017.05.23 </h1>
+
+    <ul>
+      <li> <a href="#Intro">Introduction</a> </li>
+      <li> <a href="#Getting-Curveball">Getting the BBN Curveball source</a> </li>
+      <li> <a href="#Linux-u1204">Linux - Ubuntu 12.04</a> </li>
+    </ul>
+
+    <h2> <a id="Intro">Introduction</a> </h2>
+
+    <p> This document describes how to build the
+    version of Raytheon BBN Technologies' BBN Curveball
+    specified in the title of this document. </p>
+
+    <p> This document is intended for developers who want to
+    extend or modify BBN Curveball in some way.
+    (Ordinary users will usually find it more convenient
+    to install a pre-built version of BBN Curveball than
+    to build their own.) </p>
+
+    <p>
+    Note that installing the tools needed to build
+    BBN Curveball may require system privileges on many operating systems.
+    </p>
+
+    <p>
+    This document only describes how to build BBN Curveball for
+    Ubuntu 12.04 on the amd64 platform.
+    BBN Curveball also supports
+    Windows 7, Windows 8, Android, and MacOSX,
+    and future releases will contain detailed instructions for
+    building for those platforms.
+    </p>
+
+    <h2> Getting the BBN Curveball source </h2>
+
+    <p>
+    The source for BBN Curveball is available from
+    <a href="https://curveball.nct.bbn.com/">curveball.nct.bbn.com</a>.
+    </p>
+
+    <p>
+    Make sure that the version you download matches
+    this document.
+    If you choose to download and use a different version of the
+    source, then you can follow the directions for
+    getting and unpacking the source in this document,
+    and then continue with the appropriate instructions
+    that were bundled with the version you downloaded.
+    </p>
+
+    <p>
+    The BBN Curveball source is released as a gzip'd tar file.
+    The name of the file will have the form
+    <tt>curveball-<i>VERSION</i>.tgz</tt>, where
+    <i>VERSION</i> is a string of the form <tt><i>YYYY.MM.DD</i></tt>
+    that represents the date of the release.
+    In the rest of this document, we will use the string
+    VERSION to represent the date of the release.
+    </p>
+
+    <p>
+    In order to open it, you need to have a version of <tt>tar</tt> that
+    is able to decompress the gzip format, or you will need to have
+    a version of gzip.
+    These tools are included by default on Linux and MacOSX,
+    but on Windows it may be necessary to download a third-party tool.
+    We recommend <tt>mingw</tt>, for building on Windows 7.
+    </p>
+
+    <h2> <a id="Linux-u1204">Linux - Ubuntu 12.04 (amd64)</a> </h2>
+
+    <p>
+    Curveball has been primarily developed and tested on Ubuntu 12.04 on
+    the <tt>amd64</tt> architecture.
+    It has also been built and tested successfully on the <tt>i386</tt>
+    architecture.
+    It has not been tested on architectures with different endianess. </p>
+
+    <b>NOTE: for this version of BBN Curveball,
+    it is generally a good idea to build on a virtual machine
+    or dedicated host</b>
+    because the build procedure may download and install or update any
+    packages that are required by the build process or by BBN Curveball.
+    Also note that the build procedure may also install BBN Curveball
+    software on the build machine, and may alter configuration files.
+    <b>Building BBN Curveball may modify the configuration of the build
+      machine, even if BBN Curveball is not installed.</b>
+    This will be fixed in a future release.
+    </p>
+
+    <p>
+    After downloading the release tarball with the desired <i>VERSION</i>,
+    and placing it in working direction:
+    </p>
+
+    <pre>
+    tar zxf curveball-<i>VERSION</i>.tgz
+    cd curveball-<i>VERSION</i>/src
+    make debfile
+    </pre>
+
+    <p>
+    This will create a Debian package file for the current architecture,
+    with a name with the prefix <tt>curveball-<i>VERSION</i></tt>,
+    in the directory <tt>curveball-<i>VERSION</i>/src</tt>.
+    </p>
+
+    <p>
+    <b>Note:</b> during the build of the BBN Curveball <tt>click</tt> elements,
+    you may see messages like the following:
+    </p>
+
+    <pre>
+    ...
+    CXX decodertest.cc
+    /bin/bash: decodertest.d: No such file or directory
+    CXX dr2dpdecoder.cc
+    /bin/bash: dr2dpdecoder.d: No such file or directory
+    CXX dr2dpdecodertest.cc
+    /bin/bash: dr2dpdecodertest.d: No such file or directory
+    ...
+    </pre>
+
+    <p>
+    These messages are harmless and do not indicate that the build
+    has failed.
+    </p>
+
+    <h3> Notes </h3>
+
+    <p>
+    There are no prerequisites that need to be installed or configured
+    before building BBN Curveball on Ubuntu 12.04.
+    The build procedure will download and install any packages that
+    are required by the build process and are not already installed.
+    Note that this requires network access and <tt>sudo</tt>.
+    </p>
+
+    <p>
+    In addition to creating the Debian package,
+    the Curveball scripts, executables, and other files
+    are copied to <tt>curveball-<i>VERSION</i>/build</tt>.
+    </p>
+
+    <h2> Acknowledgements </h2>
+
+    <p>
+    This product includes
+    software developed in part by support from the
+    Defense Advanced Research Project Agency (DARPA)
+    Contract No. N66001-11-C-4017.
+    </p>
+
+  </body>
+</html>
+

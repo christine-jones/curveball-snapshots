@@ -1,0 +1,118 @@
+#!/bin/bash
+#
+# This material is based upon work supported by the Defense Advanced
+# Research Projects Agency under Contract No. N66001-11-C-4017.
+#
+# Copyright 2014 - Raytheon BBN Technologies Corp.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or
+# implied.  See the License for the specific language governing
+# permissions and limitations under the License.
+
+# logging/diagnostic functions
+script_name=$(basename "$0")
+log() { printf '%s: %s\n' "${script_name}" "$*"; }
+error() { log "ERROR: $*" >&2; }
+fatal() { error "$*" ; exit 1; }
+usage_fatal() { error "$*" ; usage >&2; exit 1; }
+
+usage() {
+    cat << EOF
+
+usage: $0 command
+
+    Commands:
+
+    android-ndk - print the path to the Android NDK to use
+
+    check-ndk - confirm that there is an NDK installed and in
+	the path of the user
+
+    install - install the .apk file onto an attached Android device
+
+EOF
+}
+
+if [ "$1" = '' ]; then
+    usage_fatal
+fi
+
+# make sure that all of the ops are OK before starting any of them
+
+while getopts "hr:" opt; do
+    case ${opt} in
+	h)
+	    usage
+	    exit 0
+	    ;;
+    esac
+done
+
+shift $((OPTIND - 1))
+
+for op in $*; do
+    case "$op" in
+	android-ndk|check-ndk|install)
+	    ;;
+	help)
+	    usage
+	    exit 0
+	    ;;
+	*)
+	    usage_fatal "invalid command"
+	    ;;
+    esac
+done
+
+android_attached() {
+    test $(adb devices | grep -q -w device)
+}
+
+NDK_BUILD=ndk-build
+APK_PATH="./android/Curveball-for-Android/bin/Curveball-for-Android-debug.apk"
+
+for op in $*; do
+    case "$op" in
+
+	android-ndk)
+	    echo $(dirname $(which "${NDK_BUILD}"))
+	    ;;
+
+	check-ndk)
+	    if [ ! $(which "${NDK_BUILD}") ]; then
+		error "no $NDK_BUILD found"
+		fatal "check that the Android NDK is in your path"
+	    fi
+	    ;;
+
+	install)
+	    if [ ! android_attached ]; then
+		error "cannot install: no android device attached"
+		echo "To install, run: "
+		echo "adb install $APK_PATH"
+		exit 1
+	    fi
+	    log "Installing onto attached Android device..."
+	    log "This may take a few minutes, please be patient."
+	    log ""
+	    adb install "${APK_PATH}"
+	    if [ $? -ne 0 ]; then
+		fatal "installation failed"
+	    fi
+	    ;;
+
+	*)
+	    usage_fatal "invalid command"
+	    ;;
+    esac
+done
+
+exit 0

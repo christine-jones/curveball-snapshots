@@ -1,0 +1,190 @@
+# This material is based upon work supported by the Defense Advanced
+# Research Projects Agency under Contract No. N66001-11-C-4017.
+#
+# Copyright 2014 - Raytheon BBN Technologies Corp.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or
+# implied.  See the License for the specific language governing
+# permissions and limitations under the License.
+
+
+
+This directory contains a dynamically linked Click package that contains
+the Curveball elements necessary to support a Decoy Router.
+
+This file includes information for installing and running the Curveball
+package within the kernel. Refer to README.userlevel for information about
+installing and running the Curveball package at the user level.
+
+
+INSTALLATION
+------------
+
+Click supports a "patchless" install, i.e., the kernel does not require
+patching to support the loading of Click router configurations into the
+kernel. This requires the use of Click 2.01 or greater.
+
+The main Click package must be installed prior to this Curveball package.
+If using the Click sources from the Curveball repository, the
+click-09222011.tar.gz tarball or later is required.
+
+Patchless installs are on by default. Therefore, Click can be installed
+simply by using the following commands.
+
+	./configure
+	make install
+
+However, you may need to install the linux header files first. Use the
+following command to do so.
+
+	apt-get install linux-headers-($uname -r)
+
+See the Click documentation for additional information about configuring,
+compiling, and installing Click.
+
+From this directory run
+
+	./configure [--prefix=DIR]
+
+Use the '--prefix' parameter to specify the Click install directory if the
+Click package was installed to a directory other than the default '/usr/local'.
+
+Next, run 'make install'. This will build and install the element collection,
+manual pages, and an 'elementmap' for the Curveball package.
+
+See the README.click file for additional information.
+
+
+RUNNING THE DECOY ROUTER
+------------------------
+
+The Decoy Router inspects all TLS Hello packets for a known Curveball
+sentinel. If a packet is determined to contain a sentinel, then that packet
+and all subsequent packets within that flow are redirected to the Decoy
+Proxy.
+
+The Decoy Router communicates with a user-space process that interfaces with
+the Curveball Decoy Proxy. Communication is via a /dev file. Packets to be
+redirected to the Decoy Proxy are sent to this process and state updates and
+feedback are received from this process.
+
+Run the following command to load the Curveball router configuration into
+the kernel. Root privileges are required.
+
+	click-install decoy-router-kernel.click [DEV= ]
+
+The following input parameters are used to configure the Decoy Router for
+the local host.
+
+DEV	The network device from which the Decoy Router redirects Curveball
+	packets. The default interface is eth0.
+
+And use the following command to unload the router configuration.
+
+	click-uninstall
+
+Refer to the 'click-install' and 'click-uninstall' man pages and/or Click
+documentation for additional information on loading/unloading router
+configurations into the kernel.
+
+Two earlier versions of the Decoy Router that provide incremental functionality
+are also available. They are run just as the main Decoy Router.
+
+incremental-dr-kernel.click
+	This version of the Decoy Router inspects all TCP packets destined to
+	a configured port (default of 11375) for a known sentinel string
+	(default "DEADBEEF"). If a packet is determined to contain a sentinel,
+	then that packet and all subsequent packets within that flow are
+	redirected to the Decoy Proxy.
+
+incremental-tls-dr-kernel.click
+	This version of the Decoy Router inspects all TLS Hello packets for a
+	known sentinel string (default "DEADBEEF"). If a packet is determined
+	to contain a sentinel, then that packet and all subsequent packets
+	within that flow are redirected to the Decoy Proxy.
+
+NOTE that by default the Decoy Router intercepts packets on the 'eth0'
+interface. The $DEV variable defined at the beginning of the router
+configuration may be edited to specify a different interface.
+
+NOTE that the device through which the Decoy Router and user-space process
+(that interfaces with the Decoy Proxy) communicate must be created. To do
+this run the following command with root privileges.
+
+	mknod /dev/click_user0 c 241 0
+
+
+COMPILING/INSTALLING A CUSTOM KERNEL
+------------------------------------
+
+The Curveball package no longer requires a custom kernel, but these
+instructions remain in case they are needed in the future.
+
+This section details a proven process for compiling and installing a custom
+kernel for use by the Curveball Click package. A custom kernel is required
+that has CONFIG_MODVERSIONS disabled so that the Curveball package may be
+successfully compiled and installed with the use of the 'patchless' Click
+linuxmodule.
+
+The kernel was compiled and installed on a VirtualBox VM. (A hard disk of
+greater than 20G is required.) The VM was running Ubuntu 10.4 which uses
+the linux kernel 2.6.32-28-generic.
+
+These instructions were largely taken from the following website:
+
+	https://help.ubuntu.com/community/Kernel/Compile
+
+Install necessary tools.
+
+	sudo apt-get install fakeroot build-essential crash kexec-tools
+                             makedumpfile kernel-wedge
+	sudo apt-get build-dep linux
+	sudo apt-get install git-core libncurses5 libncurses5-dev libelf-dev
+                             asciidoc binutils-dev
+
+Download the kernel source archive.
+
+	mkdir linux
+	cd linux
+	sudo apt-get build-dep --no-install-recommends linux-image-($uname -r)
+	apt-get source linux-image-($uname -r)
+
+Modify the configuration.
+
+	cd linux-2.6.32
+
+Modify the files 'debian.master/config/config.common.ubuntu' and
+'debian.master/config/config.common.ports' so that the following line,
+'CONFIG_MODVERSIONS=y', reads 'CONFIG_MODVERSIONS=n' instead.
+
+Also, network namespaces is disabled by default. In order to run core
+experiments, network namespaces must be enabled with the following line,
+'CONFIG_NET_NS=y'.
+
+	chmod -R u+x debian/scripts/*
+	debian/rules updateconfigs
+
+Build the kernel.
+
+	fakeroot debian/rules clean
+	AUTOBUILD=1 skipabi=true fakeroot debian/rules binary-debs
+
+Install the kernel
+
+	echo vesafb | sudo tee -a /etc/initramfs-tools/modules
+	echo fbcon | sudo tee -a /etc/initramfs-tools/modules
+
+	sudo apt-get install linux-headers-2.6.32-33
+
+	sudo dpkg -i linux-image-2.6.32-33-generic_2.6.32-33.72_i386.deb
+	sudo dpkg -i linux-headers-2.6.32-33-generic_2.6.32-33.72_i386.deb
+
+Reboot the machine. Install Click and the Curveball package.

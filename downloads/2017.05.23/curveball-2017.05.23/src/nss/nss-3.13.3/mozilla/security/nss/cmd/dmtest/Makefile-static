@@ -1,0 +1,29 @@
+INCLUDES=	-I../../../../dist/Linux3.2_x86_glibc_PTH_DBG.OBJ/include \
+		-I../../../../dist/public/nss \
+		-I../../../../dist/private/nss \
+		-I../../../../dist/public/seccmd \
+		-I../../../../dist/public/dbm
+
+LIBPATH= 	-L../../../../dist/Linux3.2_x86_glibc_PTH_DBG.OBJ/lib \
+
+
+LIBS_STATIC=	-lsmime -lssl -lnss -lssl -lsectool \
+	-lpkcs12 -lpkcs7 -lcerthi -lpk11wrap \
+	-lcryptohi -lcerthi -lnsspki -lpk11wrap \
+	-lsoftokn -lcertdb -lnsspki -lnssdev \
+	-lnssb -lfreebl -ldbm -lpkixtop -lpkixutil \
+	-lpkixsystem -lpkixcrlsel -lpkixmodule \
+	-lpkixstore -lpkixparams -lpkixchecker \
+	-lpkixpki -lpkixtop -lpkixresults \
+	-lpkixcertsel -lnss -lpk11wrap -lcerthi \
+	-lsqlite -lnssutil -lplc4 -lplds4 -lnspr4 \
+	-lpthread -ldl -lc
+
+client-agent:
+	gcc -static -o client-agent $(LIBPATH) $(INCLUDES) client-agent.c server.c common.c 
+
+#	gcc -o client-agent -I../../../../dist/Linux3.2_x86_glibc_PTH_DBG.OBJ/include -I../../../../dist/public/nss -I../../../../dist/private/nss -I../../../../dist/public/seccmd -I../../../../dist/public/dbm ../$(LIBPATH)libsmime.a ../$(LIBPATH)libssl.a ../$(LIBPATH)libnss.a ../$(LIBPATH)libssl.a ../$(LIBPATH)libsectool.a ../$(LIBPATH)libpkcs12.a ../$(LIBPATH)libpkcs7.a ../$(LIBPATH)libcerthi.a ../$(LIBPATH)libpk11wrap.a ../$(LIBPATH)libcryptohi.a ../$(LIBPATH)libcerthi.a ../$(LIBPATH)libnsspki.a ../$(LIBPATH)libpk11wrap.a ../$(LIBPATH)libsoftokn.a ../$(LIBPATH)libcertdb.a ../$(LIBPATH)libnsspki.a ../$(LIBPATH)libnssdev.a ../$(LIBPATH)libnssb.a ../$(LIBPATH)libfreebl.a ../$(LIBPATH)libdbm.a  ../$(LIBPATH)libpkixtop.a ../$(LIBPATH)libpkixutil.a ../$(LIBPATH)libpkixsystem.a ../$(LIBPATH)libpkixcrlsel.a ../$(LIBPATH)libpkixmodule.a ../$(LIBPATH)libpkixstore.a ../$(LIBPATH)libpkixparams.a ../$(LIBPATH)libpkixchecker.a ../$(LIBPATH)libpkixpki.a ../$(LIBPATH)libpkixtop.a ../$(LIBPATH)libpkixresults.a ../$(LIBPATH)libpkixcertsel.a ../$(LIBPATH)libnss.a ../$(LIBPATH)libpk11wrap.a ../$(LIBPATH)libcerthi.a  -L../../../../dist/Linux3.2_x86_glibc_PTH_DBG.OBJ/lib -lsqlite3 -L../../../../dist/Linux3.2_x86_glibc_PTH_DBG.OBJ/lib -lnssutil3 -L../../../../dist/Linux3.2_x86_glibc_PTH_DBG.OBJ/lib -lplc4 -lplds4 -lnspr4  -lpthread  -ldl -lc client-agent.c
+
+
+#	gcc -o Linux3.2_x86_glibc_PTH_DBG.OBJ/client-agent.o -c -g -ansi -D_POSIX_SOURCE -D_BSD_SOURCE -D_XOPEN_SOURCE -fPIC -Di386 -DLINUX2_1  -Wall -Werror-implicit-function-declaration -Wno-switch -pipe -DLINUX -Dlinux -DHAVE_STRERROR -DXP_UNIX -DDEBUG -UNDEBUG -D_REENTRANT -DUSE_UTIL_DIRECTLY -DNSS_USE_STATIC_LIBS -I../../../../dist/Linux3.2_x86_glibc_PTH_DBG.OBJ/include -I../../../../dist/public/nss -I../../../../dist/private/nss -I../../../../dist/public/seccmd -I../../../../dist/public/dbm  client-agent.c
+

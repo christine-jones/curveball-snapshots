@@ -1,0 +1,115 @@
+# This material is based upon work supported by the Defense Advanced
+# Research Projects Agency under Contract No. N66001-11-C-4017.
+#
+# Copyright 2014 - Raytheon BBN Technologies Corp.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or
+# implied.  See the License for the specific language governing
+# permissions and limitations under the License.
+
+
+
+This directory contains a dynamically linked Click package that contains
+the Curveball elements necessary to support a Decoy Router.
+
+This file includes information for installing and running the Curveball
+package at the user level. Refer to README.kernel for information about
+installing and running the Curveball package within the kernel.
+
+
+INSTALLATION
+------------
+
+Note that the main Click package must be installed prior to this
+Curveball package.
+
+From this directory run
+
+	./configure --disable-linuxmodule [--prefix=DIR]
+
+The '--disable-linuxmodule' parameter is used to prevent the package from
+being compiled and installed for use within the kernel.
+
+Use the '--prefix' parameter to specify the Click install directory if the
+Click package was installed to a directory other than the default '/usr/local'.
+
+Next, run 'make install'. This will build and install the element collection,
+manual pages, and an 'elementmap' for the Curveball package.
+
+See the README.click file for additional information.
+
+
+RUNNING THE DECOY ROUTER
+------------------------
+
+The Decoy Router inspects all TLS Hello packets for a known Curveball
+sentinel. If a packet is determined to contain a sentinel, then that packet
+and all subsequent TLS packets within that flow are redirected to the Decoy
+Proxy.
+
+The Decoy Router communicates with a user-level process outside of Click that
+interfaces with the Curveball Decoy Proxy. Communication is via a Unix domain
+socket. Packets to be redirected to the Decoy Proxy are sent to this process
+and state updates and feedback are recevied from this process.
+
+The Curveball Decoy Router must be run with root privileges.
+
+	click decoy-router.click [DEV= ] [LOCAL_IP= ] [PATH= ]
+
+The following input parameters are used to configure the Decoy Router for
+the local host.
+
+DEV		The network device, e.g. eth0, from which the Decoy Router
+		redirects Curveball packets.
+
+LOCAL_IP	The IP address assigned to the network device from which
+		the Decoy Router redirects packets. This information is
+		used to filter transit packets from those destined to the
+		local host.
+
+PATH		Filename of the Unix domain socket used to interface with
+                the Decoy Proxy.
+
+TIMEOUT		Curveball flows that have been inactive for the specified
+                time interval (in seconds) are removed from the flow filter.
+                and no longer redirected. Default is 7 days.
+
+Note that the user-level process that forms the interface between the Decoy
+Router and the Decoy Proxy must be running prior to the start-up of the
+Decoy Router.
+
+Two earlier versions of the Decoy Router that provide incremental functionality
+are also available. They are run just as the main Decoy Router.
+
+The first version of the Decoy Router inspects all TCP packets destined to
+a configured port for a known sentinel string. If a packet is determined to
+contain a sentinel, then that packet and all subsequent packets within that
+flow are redirected to the Decoy Proxy.
+
+	click incremental_decoyrouter.click
+
+In addition to the main configuration parameters, the following are available.
+
+PORT		Curveball destination port. Default is 8141.
+
+SENTINEL	Curveball sentinel string. Default is "\xDE\xAD\xBE\xEF".
+
+The second version of the Decoy Router inspects all TLS Hello packets for a
+known sentinel string. If a packet is determined to contain a sentinel, then
+that packet and all subsequent packets within that flow are redirected to
+the Decoy Proxy.
+
+	click incremental_tls_dr.click
+
+In addition to the main configuration parameters, the following are available.
+
+SENTINEL	Curveball sentinel string. Default is "\xDE\xAD\xBE\xEF".
+

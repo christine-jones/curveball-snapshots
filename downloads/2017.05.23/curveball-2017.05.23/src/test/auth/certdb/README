@@ -1,0 +1,4 @@
+To create the cert8.db, key3.db, and secmod.db files,
+is src/packaging/create-certdb.
+
+The other files here are, for most purposes, obsolete. 

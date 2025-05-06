@@ -1,0 +1,15 @@
+To build Transmission with ENCRYPTION_INPUT enabled,
+
+(0) Install dependencies:
+    sudo apt-get install build-essential automake
+      autoconf libtool pkg-config intltool
+      libcurl4-openssl-dev libglib2.0-dev
+      libevent-dev libminiupnpc-dev
+      libminiupnpc5 libappindicator-dev
+(1) Run autogen (./autogen)
+(2) Run configure (./configure CFLAGS='-DENCRYPTION_INPUT=1'
+                     CXXFLAGS='-DENCRYPTION_INPUT=1'
+                     --prefix=/opt/curveball)
+(3) This will create the Makefile with ENCRYPTION_INPUT flag
+    enabled.
+(4) make && sudo make install

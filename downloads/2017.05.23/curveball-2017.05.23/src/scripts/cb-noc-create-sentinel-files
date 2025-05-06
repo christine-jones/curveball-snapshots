@@ -1,0 +1,165 @@
+#!/usr/bin/env python
+#
+# This material is based upon work supported by the Defense Advanced
+# Research Projects Agency under Contract No. N66001-11-C-4017 and in
+# part by a grant from the United States Department of State.
+# The opinions, findings, and conclusions stated herein are those
+# of the authors and do not necessarily reflect those of the United
+# States Department of State.
+#
+# Copyright 2014-2016 - Raytheon BBN Technologies Corp.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or
+# implied.  See the License for the specific language governing
+# permissions and limitations under the License.
+
+"""
+Routines and a utility to help generate sentinel files
+
+key_file is assumed to be formatted as: 'kname key'
+"""
+
+import datetime
+import os
+import sys
+
+from optparse import OptionParser
+
+# The directory that this executable lives in.
+#
+DIRNAME = os.path.normpath(
+        os.path.abspath(os.path.dirname(sys.argv[0]) or '.'))
+
+sys.path.append(os.path.normpath(os.path.join(DIRNAME, '..', 'python')))
+
+import cb.noc.file
+import cb.sentman.keystate
+
+from cb.noc.make_sentinel_files import make_sent_file
+from cb.noc.make_sentinel_files import make_sentbf_file
+
+
+if __name__ == '__main__':
+    def main(argv):
+        """
+        Usage: $0 key-file out-dir num-sentinels num-hours
+
+        For each key in the key-file, generate num-sentinels for the next
+        num-hours hours, starting with the current hour, and store them
+        in hourly files in out-dir.  If a file for a given hour already
+        exists, it is skipped.
+
+        The out-dir is created if it does not already exist.
+
+        If num-hours is negative or zero, no sentinel files are created.
+        """
+
+        parser = OptionParser("usage: %prog [options] keyfile")
+
+        parser.add_option(
+                '-o', '--outdir',
+                dest='outdir',
+                default='./sdata',
+                help=('DIR to store sentinel and bloomfilter files' +
+                    ' [./sdata]'),
+                metavar='DIR')
+
+        parser.add_option(
+                '--sentinels',
+                dest='nsentinels',
+                type='int',
+                default = cb.sentman.keystate.DEFAULT_SENTINELS_PER_EPOCH,
+                help='Number of sentinels to generate per key [%default]',
+                metavar='N')
+
+        parser.add_option(
+                '--hours',
+                dest='nhours',
+                type='int',
+                default=48,
+                help='Number of hours to generate sentinels [%default]',
+                metavar='N')
+
+        parser.add_option(
+                '-c', '--combined-sbf',
+                dest="combined_sbf",
+                type='int',
+                default=0,
+                help="Create a combined Bloom filter for N hours",
+                metavar="N")
+
+        parser.add_option(
+                '-s', '--safe-mode',
+                dest='safe',
+                action='store_true',
+                default=False,
+                help='Keep / skip over existing files')
+
+        (options, args) = parser.parse_args()
+
+        if (len(args) > 1):
+            print 'too many arguments:', args
+            parser.print_help()
+            sys.exit(1)
+        elif (len(args) != 1):
+            print 'keyfile required'
+            parser.print_help()
+            sys.exit(1)
+        else:
+            key_file = args[0]
+
+        out_dir = options.outdir
+        num_sentinels = options.nsentinels
+        num_hours = options.nhours
+        safe_mode = options.safe
+        combined_sbf = options.combined_sbf
+
+        # If we've been requested to create a combo filter,
+        # then we need to create the hourly sentinels to fill it,
+        # whether or not we've requested those sentinel files.
+        #
+        if num_hours < combined_sbf:
+            num_hours = combined_sbf
+
+        if num_hours <= 0:
+            print "Error: num-hours should be > 0"
+            return 1
+
+        if not os.path.isdir(out_dir):
+            os.makedirs(out_dir)
+
+        utc = datetime.datetime.utcnow()
+        delta = datetime.timedelta(hours=1)
+
+        # In order to create the sentinel Bloom filter for the current
+        # hour, we (might) need to have the sentinels for the previous
+        # hour as well.
+        # 
+        make_sent_file(utc - delta, out_dir, key_file, num_sentinels,
+                safe_mode)
+
+        curr_utc = utc
+        for _hour in range(0, num_hours):
+            make_sent_file(curr_utc, out_dir, key_file, num_sentinels,
+                    safe_mode)
+            make_sentbf_file(curr_utc, out_dir, safe=safe_mode)
+            curr_utc += delta
+
+        if combined_sbf > 0:
+            combo_name = "combo-%d-%s" % (
+                    combined_sbf, cb.noc.file.sentinel_bf_name(utc))
+
+            # Setting name of combo file in make_sentbf_file()
+            #
+            print "Creating combo Bloom filter for %d hours" % (combined_sbf,)
+            make_sentbf_file(utc, out_dir, combined_sbf, combo_name)
+
+    exit(main(sys.argv))

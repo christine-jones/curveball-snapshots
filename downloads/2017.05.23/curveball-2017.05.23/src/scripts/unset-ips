@@ -1,0 +1,89 @@
+#!/usr/bin/env bash
+#
+# This material is funded in part by a grant from the United States
+# Department of State. The opinions, findings, and conclusions stated
+# herein are those of the authors and do not necessarily reflect
+# those of the United States Department of State.
+#
+# Copyright 2016 - Raytheon BBN Technologies Corp.
+
+# Remove the address bindings on all of the interfaces given
+# on the commandline.
+#
+# NOTE: Doesn't make any attempt to prevent the user from knocking the
+# host completely off the network--be careful!
+
+# We don't want to attempt any modifications if the
+# interfaces appear to be bogus, so check them first
+# and exit if anything looks wrong.
+#
+check_iface() {
+    IFACE=$1
+
+    # Make sure that the IFACE is OK before trying to continue
+    #
+    if [ "${IFACE}" = "" ]; then
+	echo "Error: no interface provided"
+	exit 1
+    fi
+
+    ifconfig "${IFACE}" > /dev/null
+    if [ $? -ne 0 ]; then
+	echo "Error: invalid interface [$IFACE]"
+	exit 1
+    fi
+}
+
+remove_ips() {
+    IFACE=$1
+
+    # NOTE:
+    #
+    # The expressions for extracting the address and netmask from
+    # the output of ifconfig are NOTPORTABLE and are LINUX-SPECIFIC
+    #
+    ADDRS4=$(ifconfig "${IFACE}" | grep 'inet addr' | \
+	    sed -e 's/^.*addr://' -e 's/\ .*Mask:/\//')
+
+    ADDRS6=$(ifconfig "${IFACE}" | grep 'inet6 addr' | awk '{print $3}')
+
+    for addr in $ADDRS4 $ADDRS6; do
+	echo sudo ip addr del "${addr}" dev "${IFACE}"
+	sudo ip addr del "${addr}" dev "${IFACE}"
+	if [ $? -ne 0 ]; then
+	    echo "Error: \"sudo ip addr del ${addr} dev ${IFACE}\" failed"
+	    exit 1
+	fi
+    done
+}
+
+usage() {
+    echo "$0 iface [iface...]"
+}
+
+if [ $# -eq 0 ]; then
+    usage
+    echo "Error: no interfaces provided"
+    exit 1
+fi
+
+for iface in $*; do
+    # Just saying "eth" on Linux gives the "default" Ethernet
+    # device (usually eth0).  Don't permit the user to use defaults.
+    #
+    if [ "${iface}" = "eth" ]; then
+	usage
+	echo "Error: default device name 'eth' not permitted"
+	exit 1
+    fi
+
+    echo "Checking $iface"
+    check_iface "${iface}"
+done
+
+for iface in $*; do
+    echo "Removing IP addresses from $iface"
+    remove_ips "${iface}"
+done
+
+exit 0

@@ -1,0 +1,378 @@
+#!/usr/bin/env python
+#
+# This material is based upon work supported by the Defense Advanced
+# Research Projects Agency under Contract No. N66001-11-C-4017.
+#
+# Copyright 2014 - Raytheon BBN Technologies Corp.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or
+# implied.  See the License for the specific language governing
+# permissions and limitations under the License.
+
+
+"""
+Implements the client side of the quilt protocol
+
+The VPN proxy does not interact well with Remora, and has
+not been extensively tested.  The SOCKS proxy is well tested.
+"""
+
+import logging
+import os
+import re
+import socket
+import sys
+
+# The directory that this executable lives in.
+#
+DIRNAME = os.path.normpath(
+        os.path.abspath(os.path.dirname(sys.argv[0]) or '.'))
+
+sys.path.append(os.path.normpath(os.path.join(DIRNAME, '..', 'python')))
+
+import cb.util.unbuffered
+cb.util.unbuffered.unbuffer()
+
+from optparse import OptionParser
+
+from twisted.internet import reactor
+from twisted.internet.task import LoopingCall
+
+from cb.ccp.ccp import CCPMessage
+from cb.ccp.ccp_client import CCPClient
+
+from qe2.core.chanman import Qe2ChannelDescriptor
+from qe2.core.chanman import Qe2ChannelManager
+from qe2.core.client import Qe2Client
+from qe2.core.channel import Qe2SocketClientChannel
+from qe2.core.curveball import Qe2CurveballClientChannel
+from qe2.core.log import Qe2Logger
+from qe2.core.log import QE2LOG
+
+Qe2Logger.init_logger(loggername='cb')
+
+QUILT_PORT = 5002
+PROXY_PORT = 5010
+CCP_TO_QUILT_PORT = 5001
+SERVER_HOST = 'quilt'
+CURVEBALL_CLIENT_PORT_BASE = 2305
+
+# Permit older synonyms to be used as the names of some protocols.
+# For example, '443' is permitted for the older 'tls' protocol.
+#
+PROTO_MAP = {
+        # synonyms for tls
+        '443' : 'tls', 'tls' : 'tls', 'https' : 'tls', 'tls-bi' : 'tls',
+
+        # synonyms for http
+        '80' : 'http', 'http' : 'http', 'http-bi' : 'http',
+
+        # The unidirectional protocols
+        'tls-uni' : 'tls-uni',
+        'http-uni' : 'http-uni',
+
+        # Use remora to choose the decoy:protocol
+        'remora' : 'remora', 'Remora' : 'remora',
+
+        # Non-curveball
+        'sock' : 'sock',
+    }
+
+# Omitting BitTorrent until it is more mature
+#
+PROTO_NAMES = """
+Supported protocol names:
+
+    tls      - Bidirectional TLS Curveball protocol
+    tls-uni  - Unidirectional TLS Curveball protocol
+    http     - Bidirectional HTTP Curveball protocol
+    http-uni - Unidirectional HTTP Curveball protocol
+    sock     - Direct TCP/IP socket (no Curveball)
+    remora   - Decoy name and protocol chosen by Remora
+"""
+
+def parse_args(argv):
+    """
+    Deduce the parameters from the argv
+    """
+
+    # I'm just making these up as an example.  Beware.
+    default_vpn_subnets = '10.2.0/24,10.2.1/24'
+
+    parser = OptionParser()
+
+    parser.add_option('-c', '--covert',
+            default=default_vpn_subnets, dest='covert_subnets',
+            help='Subnets to VPN (VPN mode only) [%default]')
+
+    parser.add_option('--chan-lifespan',
+            default=30, dest='chan_lifespan', type=int,
+            metavar='SECONDS',
+            help='Lifespan of each channel (-1 for infinite) [%default]')
+
+    parser.add_option('--chan-count',
+            default=2, dest='chan_count', type=int,
+            metavar='COUNT',
+            help='How many concurrent channels to start [%default]')
+
+    parser.add_option('-d', '--decoys', dest='decoy_list_str',
+            default='decoy:tls,decoy:http',
+            help=('Comma-separated list of decoy-host:protocol pairs.  '
+                + 'Supported protocols include tls, tls-uni, http, '
+                + 'http-uni, remora, and sock.'),
+            metavar='HOST:PROTO')
+
+    parser.add_option('--no-covert-dns', dest='no_covert_dns',
+            default=False, action='store_true',
+            help='Do not use a "covert" DNS server [%default]')
+
+    parser.add_option('-l', '--logging-level',
+            dest='logging_level', default=3, type=int,
+            help='Logging level: 1-5, or 0 for no logging [%default]')
+
+    parser.add_option("--no-ccp", dest="provide_ccp",
+            default=True, action="store_false",
+            help="Provide CCP [%default]")
+    
+    parser.add_option("-p", "--proxy", dest="proxy_port",
+            default=PROXY_PORT, type=int,
+            help="Local SOCKS proxy port [%default]",
+            metavar='PORT')
+
+    parser.add_option('--quilt-host',
+            default=SERVER_HOST,
+            help='The name of the quilt server [%default]',
+            metavar='HOSTNAME')
+
+    parser.add_option("-v", "--vpn", dest="vpn",
+            default=False, action="store_true",
+            help="Create a VPN [%default]")
+
+    parser.add_option("--vpn-default", dest="vpn_default",
+            default=False, action="store_true",
+            help="Use the VPN for the default route. " +
+                    "NOTE: DO NOT USE ON DETER [%default]")
+
+    parser.add_option("-x", "--crypto",
+            dest='crypto',
+            default=True, action="store_true",
+            help="(obsolete - has no effect)")
+
+    (options, args) = parser.parse_args(argv)
+    if len(args) > 1:
+        print 'ERROR: incorrect usage'
+        parser.print_help()
+        sys.exit(1)
+
+    # truncate silly logging levels
+    #
+    if options.logging_level < 0:
+        options.logging_level = 0
+    elif options.logging_level > 5:
+        options.logging_level = 5
+
+    # set the logging levels for 'cb' (used by Curveball) and 'qe2'
+    # (used by the quilting modules)
+    #
+    logging.getLogger('cb').setLevel(10 * options.logging_level)
+    logging.getLogger('qe2').setLevel(10 * options.logging_level)
+
+    # FIXME: yuck: parse the args and put them back in the options.
+    options.covert_subnets = re.split(',', options.covert_subnets)
+
+    decoy_elems = options.decoy_list_str.split(',')
+    decoy_list = [ elem.split(':') for elem in decoy_elems ]
+
+    for decoy in decoy_list:
+        if len(decoy) != 2:
+            print "Error: bad decoy in: [%s]" % options.decoy_list_str
+            print "    Must have form HOST:PROTOCOL,HOST:PROTOCOL..."
+            sys.exit(1)
+        if not decoy[1] in PROTO_MAP:
+            print "Error: bad protocol in: [%s]" % options.decoy_list_str
+            print PROTO_NAMES
+            sys.exit(1)
+
+    if options.chan_count > len(decoy_list):
+        print 'Error: number of channels cannot exceed number of decoys'
+        sys.exit(1)
+
+    if options.chan_lifespan < 0:
+        options.chan_lifespan = -1
+
+    proxy_addr = ('', int(options.proxy_port))
+
+    return (options, proxy_addr, decoy_list)
+
+def make_nudger(chanman, chan_count):
+    """
+    Create a closure for the channel nudger
+    """
+
+    def nudger():
+        """
+        Simple nudger, for debugging
+        """
+
+        chanman.update()
+
+        QE2LOG.debug('CHANMAN: running %d starting %d latent %d',
+                len(chanman.running), len(chanman.starting),
+                len(chanman.latent))
+        QE2LOG.info('%s', str(chanman))
+
+        if (len(chanman.running) + len(chanman.starting)) < chan_count:
+            chanman.start_one()
+
+    return nudger
+
+def quilt_client_main():
+
+    """
+    Scaffolding for a test of the quilting client.
+    """
+
+    # params = QuiltClientState
+
+    (opts, proxy_addr, decoys) = parse_args(sys.argv)
+
+    # Should be a commandline option
+
+    # params.decoys = decoys
+    # params.use_curveball = True
+    # params.server_host = opts.quilt_host
+    # params.use_keys = opts.crypto
+
+    srv_ipaddr = socket.gethostbyname(opts.quilt_host)
+
+    # TODO: should be a parameter
+    srv_port = QUILT_PORT
+
+    # print 'srv_ipaddr %s port %d' % (srv_ipaddr, srv_port)
+
+    client = Qe2Client(srv_ipaddr, srv_port, 'localhost', CCP_TO_QUILT_PORT)
+    chanman = Qe2ChannelManager(client)
+
+    desc_num = 0
+    localport = CURVEBALL_CLIENT_PORT_BASE
+
+    for decoy in decoys:
+        print 'DECOY [%s]' % str(decoy)
+        (decoy_host, decoy_protocol) = decoy
+
+        if not decoy_protocol in PROTO_MAP:
+            print 'Error: unknown decoy protocol in [%s]' % decoy
+            sys.exit(1)
+
+        # map to the canonical name for the protocol
+        #
+        decoy_protocol = PROTO_MAP[decoy_protocol]
+
+        if decoy_protocol == 'sock':
+            # NON-CURVEBALL connect, for testing only
+            #
+            description = 'desc%d socket %s:%d' % (
+                    desc_num, srv_ipaddr, srv_port)
+
+            desc = Qe2ChannelDescriptor(description,
+                    Qe2SocketClientChannel,
+                    { 'lifespan' : opts.chan_lifespan },
+                None, 0.01)
+            chanman.register(desc)
+        else:
+            description = 'desc%d curveball %s:%s localport %d' % (
+                    desc_num, decoy_host, decoy_protocol, localport)
+
+            desc = Qe2ChannelDescriptor(description,
+                    Qe2CurveballClientChannel,
+                    { 'localport' : localport, 'decoy_host' : decoy_host,
+                        'decoy_protocol' : decoy_protocol,
+                        'lifespan' : opts.chan_lifespan },
+                None, 0.01)
+            chanman.register(desc)
+
+            localport += 5
+
+        desc_num += 1
+
+    nudger = make_nudger(chanman, opts.chan_count)
+
+    looper = LoopingCall(nudger)
+    looper.start(1, now=True)
+
+    if opts.provide_ccp:
+        from cb.vpn.client import VpnClient
+        from cb.vpn.client import VpnClientState
+        from cb.vpn.client import WinVpnClient
+
+        # proxy_addr is the address that apps should use as a SOCKS proxy
+        #
+
+        # tunnel_addr is the address that would ordinarily use to
+        # connect to the client-agent, but now instead uses to
+        # connect to the quilt.
+        #
+        # TODO: make a parameter
+        #
+        tunnel_addr = ('localhost', CCP_TO_QUILT_PORT)
+
+        # print 'TUNNEL_ADDR (CCP should use): %s' % str(tunnel_addr)
+
+        if opts.vpn:
+            print "Provides VPN for subnets = %s" % (str(opts.covert_subnets),)
+            conn_type = CCPMessage.OPEN_CVPN_CONN
+        else:
+            print 'Provides a SOCKS proxy at: %s' % str(proxy_addr)
+            conn_type = CCPMessage.OPEN_SOCKS5_CONN
+
+        ccp_client = CCPClient(proxy_addr, tunnel_addr, None, None, False,
+                conn_type=conn_type)
+
+        if opts.vpn:
+            decoy_addrs = set()
+            for decoy in decoys:
+                decoy_host = decoy[0]
+                decoy_addrs.add(socket.gethostbyname(decoy_host))
+
+            for decoy_addr in decoy_addrs:
+                # pin the route to the decoy host.
+                if sys.platform == 'win32':
+                    cb.util.winpin.win_pin_routes([decoy_addr])
+                else:
+                    exec_dir = os.path.split(os.path.abspath(sys.argv[0]))[0]
+                    cmd = '%s %s' % (
+                            os.path.join(exec_dir, 'curveball-pin-route'),
+                            decoy_addr)
+                    os.system(cmd)
+
+            # The default route is set through the tunnel
+            #
+            print "CREATING VPN"
+
+            if sys.platform == 'win32':
+                vpn_client = WinVpnClient(proxy_addr,
+                        opts.vpn_default, opts.covert_subnets,
+                        no_covert_dns=opts.no_covert_dns)
+            else:
+                vpn_client = VpnClient(proxy_addr,
+                        opts.vpn_default, opts.covert_subnets,
+                        no_covert_dns=opts.no_covert_dns)
+
+    try:
+        reactor.run()
+    except BaseException, exc:
+        # print str(exc)
+        pass
+    finally:
+        print 'Curveball quilt-client exiting...'
+
+if __name__ == '__main__':
+    quilt_client_main()

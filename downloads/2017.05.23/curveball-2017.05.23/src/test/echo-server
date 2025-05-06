@@ -1,0 +1,128 @@
+#!/usr/bin/env python
+#
+# This material is based upon work supported by the Defense Advanced
+# Research Projects Agency under Contract No. N66001-11-C-4017.
+#
+# Copyright 2014 - Raytheon BBN Technologies Corp.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or
+# implied.  See the License for the specific language governing
+# permissions and limitations under the License.
+
+"""
+Simple "echo" server to test the end-to-end flow.  Permits any (reasonable)
+number of concurrent echo-client connections.
+"""
+
+import sys
+
+from optparse import OptionParser
+
+from twisted.internet import protocol        
+from twisted.internet import reactor        
+
+def parse_args():
+    """
+    Parse the commandline: $0 port
+
+    Assumes that the local service IP is localhost (or equiv).
+    """
+
+    parser = OptionParser('usage: %progname [options] port')
+
+    parser.add_option('-n', '--repetitions', dest="repetitions",
+            default=1, type=int,
+            help='Number of times to echo each char [default=\'%default\']',
+            metavar="NUMBER")
+
+    parser.add_option('-p', '--msg-prefix', dest="msg_prefix",
+            default='',
+            help='Prefix to add to each echoed message [default=\'%default\']',
+            metavar="STRING")
+
+    parser.add_option('-q', dest='quiet',
+            default=False, action='store_true',
+            help='Quiet mode - do not print as much chatter')
+
+    (options, params) = parser.parse_args()
+    if len(params) != 1:
+        parser.print_help()
+        sys.exit(1)
+
+    EchoServerProtocol.QUIET = options.quiet
+    if options.quiet:
+        print 'Running in quiet mode'
+
+    return (options, int(params[0]))
+
+
+class EchoServerProtocol(protocol.Protocol):
+    """
+    Implements the protocol for the EchoServerFactory:
+    receive data and echo it back (possibly with a message
+    prepended)
+    """
+
+    CONNECTION_NUMBER = 0
+    MESSAGE_PREFIX = ''
+    QUIET = False
+
+    def __init__(self):
+        EchoServerProtocol.CONNECTION_NUMBER += 1
+        self.connection_number = EchoServerProtocol.CONNECTION_NUMBER
+
+        if not self.QUIET:
+            print 'accepted connection: %d' % self.connection_number
+
+    def dataReceived(self, data):
+        swapped = data.swapcase()
+
+        if self.REPETITIONS > 1:
+            swapped = ''.join([char * self.REPETITIONS for char in swapped])
+
+        if not self.QUIET:
+            print '%d [%s%s]' % (self.connection_number,
+                    self.MESSAGE_PREFIX, swapped)
+        self.transport.write(self.MESSAGE_PREFIX + swapped)
+
+    def connectionLost(self, reason=None):
+        """
+        A client has vanished.
+        """
+
+        if not self.QUIET:
+            print 'closing connection: %d' % self.connection_number
+
+class EchoServerFactory(protocol.ServerFactory):
+    """
+    Factory class for the EchoServer; instantiated by a listener
+    """
+
+    protocol = EchoServerProtocol
+
+if __name__ == '__main__':
+    def main():
+        """
+        Parse the args and start up a listener with a factory
+        to create EchoServerProtocol instances
+        """
+
+        (options, port) = parse_args()
+
+        EchoServerProtocol.MESSAGE_PREFIX = options.msg_prefix
+        EchoServerProtocol.REPETITIONS = options.repetitions
+
+        factory = EchoServerFactory()
+        reactor.listenTCP(port, factory)
+
+        reactor.run()
+
+    exit(main())

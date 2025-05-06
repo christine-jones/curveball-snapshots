@@ -1,0 +1,103 @@
+#!/bin/sh
+#
+# This material is based upon work supported by the Defense Advanced
+# Research Projects Agency under Contract No. N66001-11-C-4017.
+#
+# Copyright 2014 - Raytheon BBN Technologies Corp.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or
+# implied.  See the License for the specific language governing
+# permissions and limitations under the License.
+
+
+# For each given IPv4 address (specified in dotted-quad notation,
+# followed optionally by a colon and a port, which is ignored), pin
+# the current route by adding an explicit /32 route through whatever
+# gateway the address would currently use.
+#
+# This is intended to be used by the client host before starting the
+# CVPN client in order to preserve the route to the decoy host.  It can
+# also be used to pin any other desired routes.
+#
+# If the route is already pinned then this program will appear to fail,
+# but will actually succeed.  This can be confusing.
+#
+# NOTE: This program will NOT work for IPv6 addresses, because the colon
+# notation looks too much like an IPv4 port specifier.
+#
+# NOTE: the name of this program is misleading, because it isn't
+# actually constrained to only work with TCP, and routes that are pinned
+# are pinned for all protocols, not just TCP.
+
+pin_route() {
+  local addr=$1
+  local hop=""
+  local gw=""
+  local awkpath=/usr/bin/awk
+  local headpath=/usr/bin/head
+  local ippath=/sbin/ip
+
+  echo PINNING $addr
+  if [ $(uname) = "Darwin" ]; then
+    hop=$(/sbin/route get "${addr}" | grep "gateway:" )
+    if [ $? -eq 0 ]; then
+      gw=$(echo ${hop} | ${awkpath} '{print $2}')
+
+      # It seems necessary to add this route as a /32 rather
+      # than a host route because it's not directly connected.
+      # I am not sure whether this is a BSD thing, or a VirtualBox
+      # thing.  (It's definitely a documentation thing...)
+
+      # echo adding route "${addr}"/32 via "${gw}"
+      /sbin/route delete "${addr}"/32
+      /sbin/route add "${addr}"/32 "${gw}"
+      if [ $? -eq 0 ]; then
+	echo "SUCCESS for ${addr}"
+      fi
+    fi
+  else
+
+    # If we're on Android, then the system utilities are in a
+    # different place.  There's no better way of finding out
+    # whether we're on Android than checking for that place.
+    #
+    if [ -x /system/xbin/ip ]; then
+      awkpath=/system/xbin/awk
+      headpath=/system/xbin/head
+      ippath=/system/xbin/ip
+    fi
+
+    hop=$(${ippath} route get ${addr})
+    if [ $? -eq 0 ]; then
+      gw=$(echo ${hop} | ${headpath} -1 | ${awkpath} '{print $3}')
+      ${ippath} route add "${addr}/32" via "${gw}"
+      if [ $? -eq 0 ]; then
+	echo "SUCCESS for ${addr}"
+      fi
+    fi
+  fi
+
+  return $?
+}
+
+if [ $(id -u) -ne 0 ]; then
+  echo "ERROR: you must be root to run $0"
+  exit 1
+fi
+
+for ADDR in $*; do
+  # If there is a port on end of the address, throw it away.
+  #
+  ADDR=$(echo ${ADDR} | sed -e 's/:.*$//')
+  pin_route "${ADDR}"
+done
+
+exit 0

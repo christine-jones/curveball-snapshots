@@ -1,0 +1,63 @@
+/*
+ * This material is based upon work supported by the Defense Advanced
+ * Research Projects Agency under Contract No. N66001-11-C-4017.
+ *
+ * Copyright 2014 - Raytheon BBN Technologies Corp.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or
+ * implied.  See the License for the specific language governing
+ * permissions and limitations under the License.
+ */
+
+%info
+Test the TLSHelloFilter element.
+
+%script
+click TCPDUMP_CONFIG -h c1.count -h c2.count -h c3.count -h c4.count -h c5.count > OUT1
+
+%file TCPDUMP_CONFIG
+require(package "curveball");
+
+dr2dp_encoder :: DR2DPEncoder()
+Idle -> dr2dp_encoder -> c5 :: Counter -> Discard;
+
+FromDump(../misc/curveball-capture.tcpdump, STOP true, FORCE_IP true)
+	-> Strip(14)
+	-> ip_classifier :: IPClassifier(dst tcp port 4433, -)
+	-> c1 :: Counter
+	-> CheckIPHeader2()
+// Why do packets fail the TCPHeader check?
+//	-> CheckTCPHeader()
+	-> tls_flow_detector :: TLSFlowDetector(PORT 4433,
+                                                SENTINEL "\xDE\xAD\xBE\xEF",
+                                                ENCODER dr2dp_encoder);
+
+Idle -> [1]tls_flow_detector;
+tls_flow_detector[0] -> c2 :: Counter -> Discard;
+tls_flow_detector[1] -> c3 :: Counter -> Discard;
+tls_flow_detector[2] -> Discard;
+
+ip_classifier[1] -> c4 :: Counter -> Discard;
+
+%expect stderr
+SentinelDetector::sentinel_packet: packet contains valid sentinel
+
+%expect OUT1
+c1.count:
+16
+c2.count:
+13
+c3.count:
+2
+c4.count:
+69
+c5.count:
+2

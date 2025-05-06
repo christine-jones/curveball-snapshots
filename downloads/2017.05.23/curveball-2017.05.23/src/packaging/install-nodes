@@ -1,0 +1,114 @@
+#!/usr/bin/env bash
+#
+# This material is based upon work supported by the Defense Advanced
+# Research Projects Agency under Contract No. N66001-11-C-4017.
+#
+# Copyright 2014 - Raytheon BBN Technologies Corp.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or
+# implied.  See the License for the specific language governing
+# permissions and limitations under the License.
+
+# logging/diagnostic functions
+script_name=$(basename "$0")
+log() { printf '%s: %s\n' "${script_name}" "$*"; }
+error() { log "ERROR: $*" >&2; }
+fatal() { error "$*"; exit 1; }
+usage_fatal() { error "$*"; usage >&2; exit 1; }
+
+DEBFILE="$1"
+echo $DEBFILE
+
+if [ ! -e "${DEBFILE}" ]; then
+    log "debfile missing"
+fi
+
+node_exists() {
+    nodename="$1"
+    ping -q -c 1 -w 1 ${nodename} > /dev/null 2>&1
+    res=$?
+    return $res
+}
+
+do_install() {
+    nodename=$1
+    debname=$2
+
+    node_exists "${nodename}"
+    if [ $? -eq 0 ]; then
+	echo INSTALLING ON $nodename
+
+	# NOTE: dpkg doesn't need stderr, but apt-get fails when
+	# stderr is sent to /dev/null.
+	#
+	ssh "${nodename}" /usr/bin/sudo /usr/bin/dpkg -i "${debname}" \
+		> /dev/null 2&>1
+	ssh "${nodename}" /usr/bin/sudo /usr/bin/apt-get -f -y install \
+		> /dev/null
+    fi
+}
+
+do_install_dr() {
+    nodename=$1
+
+    node_exists "${nodename}"
+    if [ $? -eq 0 ]; then
+	ssh $nodename "cd /opt/curveball/click ; sudo make"
+    fi
+}
+
+do_install_dp() {
+    nodename=$1
+
+    node_exists "${nodename}"
+    if [ $? -eq 0 ]; then
+	ssh $nodename "cd /opt/curveball/scripts ; sudo ./cb-dp -s"
+    fi
+}
+
+# Note: we don't currently install anything on the filter and router nodes.
+# This might change at some point.
+#
+NODE_TYPES="client dr dp decoy covert quilt noc"
+
+# If we ever have more than 10 nodes of some type, we'll need a more elegant
+# way of specifying all of the node numbers.
+#
+NAME_SUFFIXES="0 1 2 3 4 5 6 7 8 9 00 01 02 03 04 05 06 07 08 09 10 11 12 20 21 22"
+
+# first, do the basic install everywhere.
+
+for name in $NODE_TYPES; do
+    do_install "$name" "$DEBFILE"
+
+    for suffix in $NAME_SUFFIXES; do
+	nodename="${name}${suffix}"
+	do_install "$nodename" "$DEBFILE"
+    done
+done
+
+for name in dr; do
+    do_install_dr "$name"
+
+    for suffix in ${NAME_SUFFIXES}; do
+	nodename="${name}${suffix}"
+	do_install_dr "$nodename"
+    done
+done
+
+for name in dp quilt; do
+    do_install_dp "$name"
+
+    for suffix in ${NAME_SUFFIXES}; do
+	nodename="${name}${suffix}"
+	do_install_dp "$nodename"
+    done
+done

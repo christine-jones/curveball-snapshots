@@ -1,0 +1,69 @@
+#!/usr/bin/env python
+#
+# This material is based upon work supported by the Defense Advanced
+# Research Projects Agency under Contract No. N66001-11-C-4017.
+#
+# Copyright 2014 - Raytheon BBN Technologies Corp.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or
+# implied.  See the License for the specific language governing
+# permissions and limitations under the License.
+
+"""
+Implements a bare-bones Remora client
+
+Probably not portable to anything other than Linux right now
+"""
+
+import os
+import sys
+
+from optparse import OptionParser
+
+# The directory that this executable lives in.
+#
+DIRNAME = os.path.normpath(
+        os.path.abspath(os.path.dirname(sys.argv[0]) or '.'))
+
+sys.path.append(os.path.normpath(os.path.join(DIRNAME, '..', 'python')))
+
+from remora.client import remora_simple_request
+
+def parse_args(argv):
+    """
+    Deduce the parameters from the argv
+    """
+
+    parser = OptionParser()
+
+    parser.add_option('--remora-port', dest='remora_port',
+            metavar="PORT", type=int, default=4003,
+            help="Remora server port; [default=%default]")
+
+    (options, _args) = parser.parse_args(argv)
+
+    # FIXME - we assume that the user gives us good values.  This is weak.
+
+    return options
+
+def main(argv):
+    opts = parse_args(argv)
+
+    decoy_addr = remora_simple_request(opts.remora_port)
+    if not decoy_addr:
+	print >> sys.stderr, 'Error: Remora failed to provide a decoy'
+	return -1
+    else:
+        print '%s:%d' % (decoy_addr[0], decoy_addr[1])
+	return 0
+
+if __name__ == '__main__':
+    sys.exit(main(sys.argv))

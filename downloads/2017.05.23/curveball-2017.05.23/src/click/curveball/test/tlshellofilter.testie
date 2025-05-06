@@ -1,0 +1,78 @@
+/*
+ * This material is based upon work supported by the Defense Advanced
+ * Research Projects Agency under Contract No. N66001-11-C-4017.
+ *
+ * Copyright 2014 - Raytheon BBN Technologies Corp.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or
+ * implied.  See the License for the specific language governing
+ * permissions and limitations under the License.
+ */
+
+%info
+Test the TLSHelloFilter element.
+
+%script
+click TCPDUMP_CONFIG -h c1.count -h c2.count -h c3.count -h c4.count > OUT1
+click SUMMARY_CONFIG -h c1.count -h c2.count -h c3.count -h c4.count > OUT2
+
+%file TCPDUMP_CONFIG
+require(package "curveball");
+
+FromDump(../misc/tls.tcpdump, STOP true, FORCE_IP true)
+	-> Strip(14)
+	-> CheckIPHeader2()
+	-> CheckTCPHeader()
+	-> c1 :: Counter
+	-> sentinel_filter :: TLSHelloFilter();
+
+sentinel_filter[0] -> c2 :: Counter -> Discard;
+sentinel_filter[1] -> c3 :: Counter -> Discard;
+sentinel_filter[2] -> c4 :: Counter -> Discard;
+
+%file SUMMARY_CONFIG
+require(package "curveball");
+
+FromIPSummaryDump(FRAG, STOP true, ZERO true)
+	-> c1 :: Counter
+	-> sentinel_filter :: TLSHelloFilter();
+
+sentinel_filter[0] -> c2 :: Counter -> Discard;
+sentinel_filter[1] -> c3 :: Counter -> Discard;
+sentinel_filter[2] -> c4 :: Counter -> Discard;
+
+%file FRAG
+!data src sport dst dport ip_proto ip_id ip_frag ip_fragoff ip_len
+10.0.0.1 44 10.0.0.2 443 T 1 . 0    100
+10.0.0.1 44 10.0.0.2 443 T 2 F 0+   100
+10.0.0.1 44 10.0.0.2 443 T 2 f 100+ 100
+10.0.0.1 44 10.0.0.2 443 T 2 f 200  100
+10.0.0.1 44 10.0.0.2 443 T 3 . 0    100
+
+%expect OUT1
+c1.count:
+124
+c2.count:
+4
+c3.count:
+62
+c4.count:
+58
+
+%expect OUT2
+c1.count:
+5
+c2.count:
+0
+c3.count:
+3
+c4.count:
+2

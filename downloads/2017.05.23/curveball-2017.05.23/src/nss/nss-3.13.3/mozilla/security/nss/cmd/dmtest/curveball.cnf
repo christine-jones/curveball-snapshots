@@ -1,0 +1,4 @@
+[Curveball]
+
+CB_Public_Key_File = pub.pem
+CB_Private_Key_File = priv.pem

@@ -1,0 +1,230 @@
+#!/bin/sh
+#
+# This material is based upon work supported by the Defense Advanced
+# Research Projects Agency under Contract No. N66001-11-C-4017.
+#
+# Copyright 2014 - Raytheon BBN Technologies Corp.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or
+# implied.  See the License for the specific language governing
+# permissions and limitations under the License.
+
+
+# Start curveball in a simple manner, based on the hostname.
+# (Can also be extended to consider the EARS/DETER experiment
+# name, or any other criteria)
+#
+# In the worst case, this needs to be tweaked for every experiment.
+# For reasonably straightforward experiments, however, there is enough
+# consistency to make this reasonable.
+
+# There are extra helper scripts we use on DETER
+#
+DETERSCRIPTDIR=/opt/curveball/scripts/deter
+
+# Extra DR and DP flags
+#
+# These can be used for things like "--permit-deadbeef", or to set a
+# particular VPN range.
+#
+EXTRA_DR_FLAGS=""
+EXTRA_DP_FLAGS=""
+
+SUDO=/usr/bin/sudo
+CBDIR=/opt/curveball
+CBSCRIPTS="${CBDIR}/scripts"
+
+HOSTNAME=$(/bin/hostname)
+SHORTNAME="${HOSTNAME%%.*}"
+DOMAINNAME="${HOSTNAME#*.}"
+EXPNAME="${DOMAINNAME%%.*}"
+
+# This is hopeless if the Curveball directory is missing
+#
+if [ ! -d ${CBDIR} ]; then
+    echo "ERROR: Curveball is not installed"
+    exit 1
+fi
+
+case "${HOSTNAME}" in
+    dp*.safer.isi.deterlab.net)
+	IFACE=$(route -n | grep '^10\.' \
+		| awk '{print $8}' | grep ^eth | head -1)
+	EXTRA_DP_FLAGS="$EXTRA_DP_FLAGS --outbound-dev $IFACE"
+	;;
+    *)
+	# No need to do anything special...
+	;;
+esac
+
+make_sents() {
+
+    # We make a different scratch directory for each experiment
+    # because we don't want an experiment with weird keys to
+    # clobber an experiment with ordinary keys
+    #
+    local scratchdir
+    scratchdir="${HOME}/cb/${EXPNAME}"
+    /bin/mkdir -p "${scratchdir}"
+
+    ${SUDO} ${CBSCRIPTS}/cbnoc-keymanager push
+}
+
+make_local_sents() {
+
+    # Like make_sents, but only makes local sents and SBF files
+    #
+    local scratchdir
+    scratchdir="${HOME}/cb/${EXPNAME}"
+    /bin/mkdir -p "${scratchdir}"
+
+    ${SUDO} ${CBSCRIPTS}/cbnoc-keymanager -C push
+}
+
+
+node_exists() {
+    nodename="$1"
+    ping -q -c 1 -w 1 ${nodename} > /dev/null 2>&1
+    res=$?
+    return $res
+}
+
+# Get sudo now, because we're likely to need it later.
+${SUDO} /bin/true
+if [ $? -ne 0 ]; then
+    echo "ERROR: inadequate privs"
+    exit 1
+fi
+
+# Before starting anything, make sure that everything is shut down.
+#
+${CBSCRIPTS}/cb-shutdown
+
+# We don't want to create the sentinels and Bloom filters
+# on every dp (as we used to do).  Only create them on a node
+# named "dp", "dp0", or "noc".  By convention, there should
+# only be one of these per experiment.
+#
+case ${SHORTNAME} in
+    dp|dp0|noc)
+	echo "Creating sentinels and Bloom filters..."
+	make_sents
+	;;
+    d[pr][0-9]-cb3)
+	echo "Creating sentinels and Bloom filters..."
+	make_local_sents
+esac
+
+case ${SHORTNAME} in
+    dr|dr[0-9]|dr[0-9][0-9]|dr[0-9]-*|dr[0-9][0-9]-*)
+
+	suffix="${SHORTNAME#dr}"
+
+	DP="dp$suffix"
+	DECOY="decoy$suffix"
+	CLIENT="client$suffix"
+	UPSTREAMROUTER="ur$suffix"
+
+	# If the "upstream router" node exists and is up, then
+	# use it as the predecessor node.  Otherwise, use the
+	# matching client name as the predecessor
+	#
+	node_exists ${UPSTREAMROUTER}
+	if [ $? -eq 0 ]; then
+	    PREDECESSOR=${UPSTREAMROUTER}
+	else
+	    PREDECESSOR=${CLIENT}
+	fi
+
+	# If we're on the CB3 testbed, then hardwire the predecessor
+	#
+	if [ "${SHORTNAME}" = "dr0-cb3" ]; then
+	    PREDECESSOR="cb3"
+	elif [ "${SHORTNAME}" = "dr1-cb3" ]; then
+	    PREDECESSOR="cb3"
+	elif [ "${SHORTNAME}" = "dr2-cb3" ]; then
+	    PREDECESSOR="cb3"
+	fi
+
+	echo "NOTE: THE DP MUST START BEFORE THE DR"
+	echo "STARTING DR..."
+	echo "${SUDO} ${CBSCRIPTS}/cb-dr -d ${DP}:4001 \
+		--decoyname=${DECOY} --clientname=${PREDECESSOR} \
+		$EXTRA_DR_FLAGS"
+	${SUDO} ${CBSCRIPTS}/cb-dr -d ${DP}:4001 \
+		--decoyname=${DECOY} --clientname=${PREDECESSOR} \
+		$EXTRA_DR_FLAGS
+	exit $?
+	;;
+
+    client|client[0-9]|client[0-9][0-9]|client[0-9]-*|client[0-9][0-9]-*)
+	echo "ERROR: the client must be started by hand."
+	exit 1
+	;;
+
+    filter|filter[0-9]|filter[0-9][0-9]|filter[0-9]-*|filter[0-9][0-9]-*)
+	echo "ERROR: the filter cannot be started by this script."
+	exit 1
+	;;
+
+    covert|covert[0-9]|covert[0-9][0-9]|covert[0-9]-*|covert[0-9][0-9]-*)
+	echo "STARTING COVERT..."
+	echo "${SUDO} ${CBSCRIPTS}/mini-httpd -q"
+	${SUDO} ${CBSCRIPTS}/mini-httpd -q
+	exit $?
+	;;
+
+    decoy|decoy[0-9]|decoy[0-9][0-9]|decoy[0-9]-*|decoy[0-9][0-9]-*)
+	echo "STARTING DECOY..."
+	echo "${SUDO} ${CBSCRIPTS}/mini-httpd -q"
+	${SUDO} ${CBSCRIPTS}/mini-httpd -q
+	exit $?
+	;;
+
+    dp|dp[0-9]|dp[0-9][0-9]|dp[0-9]-*|dp[0-9][0-9]-*)
+
+	# Special cases for an internal testbed.
+	#
+	if [ "${SHORTNAME}" = "dp0-cb3" ]; then
+	    EXTRA_DP_FLAGS="$EXTRA_DP_FLAGS --permitted-subnet=128.89.63.8/29"
+	elif [ "${SHORTNAME}" = "dp1-cb3" ]; then
+	    EXTRA_DP_FLAGS="$EXTRA_DP_FLAGS --permitted-subnet=128.89.63.24/29"
+	elif [ "${SHORTNAME}" = "dp2-cb3" ]; then
+	    EXTRA_DP_FLAGS="$EXTRA_DP_FLAGS --permitted-subnet=128.89.63.40/29"
+	fi
+
+	echo "${SUDO} ${CBSCRIPTS}/cb-dp -t $EXTRA_DP_FLAGS"
+	${SUDO} ${CBSCRIPTS}/cb-dp $EXTRA_DP_FLAGS
+	exit $?
+	;;
+
+    quilt)
+	echo "Starting quilt node..."
+	cd ${CBSCRIPTS}; ${SUDO} ./quilt-server
+	;;
+
+    dns)
+	DNSSETUP="${DETERSCRIPTDIR}/setup-dns-server.sh"
+	if [ -x "${DNSSETUP}" ]; then
+	    echo "Starting DNS SETUP"
+	    "${DNSSETUP}"
+	fi
+	;;
+
+    *)
+	echo "ERROR: unsupported node $HOSTNAME"
+	exit 1
+	;;
+
+esac
+
+echo "ERROR: service exited"
+exit 1

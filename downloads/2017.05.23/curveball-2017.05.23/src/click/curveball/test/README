@@ -1,0 +1,40 @@
+# This material is based upon work supported by the Defense Advanced
+# Research Projects Agency under Contract No. N66001-11-C-4017.
+#
+# Copyright 2014 - Raytheon BBN Technologies Corp.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or
+# implied.  See the License for the specific language governing
+# permissions and limitations under the License.
+
+
+
+This directory contains unit and regression tests for the Curveball package.
+
+
+The main Click package provides the 'testie' tool for running unit and
+regression tests. To run 'testie', pass it one or more test files, e.g.,
+
+	testie bloomfilter.testie
+
+Alternatively, specify directory names; the directories are recursively
+searched for '*.testie' files.
+
+	testie .
+
+Test status will be printed. Error messages are provided for failed tests.
+
+Refer to the 'testie' man page for additional information.
+
+
+Note that 'flowfilter.testie' will likely fail if run on Mac OS X or any
+operating system other than Linux. This is due to the fact that flow keys
+are stored within the hash table in a different order.

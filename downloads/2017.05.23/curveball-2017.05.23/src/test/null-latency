@@ -1,0 +1,21 @@
+#!/bin/sh
+
+COVERT=covert
+
+# See the comment at the beginning of ./latency
+
+# Remember you will want to run this program using "time":
+#
+#    time ./null-latency
+#
+
+# "without curveball overhead" includes without using socks
+echo --------------- testing without curveball overhead -------------
+for hundreds in 0 1 2 3 4 5 6 7 8 9; do
+    for tens in 0 1 2 3 4 5 6 7 8 9; do 
+        for ones in 0 1 2 3 4 5 6 7 8 9; do
+            echo pass $hundreds$tens$ones
+            echo 'hi' | ./echo-client $COVERT 2300 
+        done
+    done
+done 

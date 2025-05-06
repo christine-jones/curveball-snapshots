@@ -1,0 +1,150 @@
+#!/bin/bash
+#
+# This material is based upon work supported by the Defense Advanced
+# Research Projects Agency under Contract No. N66001-11-C-4017.
+#
+# Copyright 2014 - Raytheon BBN Technologies Corp.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or
+# implied.  See the License for the specific language governing
+# permissions and limitations under the License.
+
+# Tests download throughput with and without Curveball, with different
+# tunnel types (currently http and https), using mini-httpd as the
+# data source.
+#
+# Somewhat hardcoded; some parameters can be changed by modifying
+# the constants below.
+#
+# Kills any running Curveball client and starts a new one
+
+rm -f /tmp/cbsmd-ss
+
+COVERT=covert
+case $(($RANDOM % 5)) in 
+0) DECOY=decoy;;
+1) DECOY=www.google.com;;
+2) DECOY=www.amazon.com;;
+3) DECOY=www.nytimes.com;;
+4) DECOY=www.mit.edu;;
+esac
+
+echo ---------------------- decoy is $DECOY --------------------------
+
+TSIZE=4000000
+ITERS="0 1 2 3 4"
+
+export PYTHONPATH=/opt/curveball/python/:$PYTHONPATH
+
+CLIENT=curveball-client
+SCRIPTS=/opt/curveball/scripts
+CLIENTPATH="/opt/curveball/scripts/${CLIENT}"
+if [ -x $CLIENTPATH ]; then
+   echo Using client: $CLIENTPATH
+   export PYTHONPATH=/opt/curveball/python/:$PYTHONPATH
+else
+    SCRIPTS=../scripts
+    CLIENTPATH="../scripts/${CLIENT}"
+    export PYTHONPATH=../python:$PYTHONPATH
+    if [ -x $CLIENTPATH ]; then
+       echo Using client: $CLIENTPATH
+    else 
+       echo Cannot find $CLIENT
+       exit 1
+    fi
+fi
+
+CURL=/usr/bin/curl
+SUDO=/usr/bin/sudo
+PKILL=/usr/bin/pkill
+
+# By default, on EARS there is an http_proxy set so that things
+# like apt-get will work.  We need to disable this before curl
+# tries to use it.
+#
+unset http_proxy
+
+# Get sudo established quickly, instead of making the user
+# type a password later
+${SUDO} /bin/true
+
+condition="normal http download"
+for ones in $ITERS; do
+    $CURL -w "$condition $ones %{speed_download} B/s %{size_download} B\n" \
+	    -4 -o /dev/null -s \
+	    "http://${COVERT}/?size=$TSIZE"
+done
+
+# TODO: remove the --insecure when we get the certs right consistently
+condition="normal https download"
+for ones in $ITERS; do
+    $CURL -w "$condition $ones %{speed_download} B/s %{size_download} B\n" \
+	    -4 -o /dev/null -s \
+	    --insecure \
+	    "https://${COVERT}/?size=$TSIZE"
+done
+
+# If there's already a curveball client running, then we don't know
+# what parameters it has: kill it and start a new one.
+#
+${SUDO} ${PKILL} -f ${CLIENT}
+
+${SUDO} ${SCRIPTS}/curveball-key-config -c cbtest0
+${SUDO} ${CLIENTPATH} -x -d "${DECOY}:80" -w &
+# 2> /dev/null &
+sleep 5
+
+condition="curveball-http http download"
+for ones in $ITERS; do
+    $CURL -w "$condition $ones %{speed_download} B/s %{size_download} B\n" \
+	    -4 -o /dev/null -s \
+	    --socks localhost:5010 \
+	    "http://$COVERT/?size=$TSIZE"
+done
+
+# TODO: remove the --insecure when we get the certs right consistently
+condition="curveball-http https download"
+for ones in $ITERS; do
+    $CURL -w "$condition $ones %{speed_download} B/s %{size_download} B\n" \
+	    -4 -o /dev/null -s \
+	    --insecure \
+	    --socks localhost:5010\
+	    "https://$COVERT/?size=$TSIZE"
+done
+
+# Kill the http client and rerun with the https client
+#
+${SUDO} ${PKILL} -f ${CLIENT}
+${SUDO} ${CLIENTPATH} -x -d "${DECOY}:443" & 
+# 2> /dev/null &
+sleep 5
+
+condition="curveball-https http download"
+for ones in $ITERS; do
+    $CURL -w "$condition $ones %{speed_download} B/s %{size_download} B\n" \
+	    -4 -o /dev/null -s \
+	    --socks localhost:5010 \
+	    "http://$COVERT/?size=$TSIZE"
+done
+
+# TODO: remove the --insecure when we get the certs right consistently
+condition="curveball-https https download"
+for ones in $ITERS; do
+    $CURL -w "$condition $ones %{speed_download} B/s %{size_download} B\n" \
+	    -4 -o /dev/null -s \
+	    --insecure \
+	    --socks localhost:5010\
+	    "https://$COVERT/?size=$TSIZE"
+done
+
+# Clean up any clients we left behind
+#
+${SUDO} ${PKILL} -f ${CLIENT}

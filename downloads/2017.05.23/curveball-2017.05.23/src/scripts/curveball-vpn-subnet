@@ -1,0 +1,62 @@
+#!/bin/sh
+#
+# This material is based upon work supported by the Defense Advanced
+# Research Projects Agency under Contract No. N66001-11-C-4017.
+#
+# Copyright 2014 - Raytheon BBN Technologies Corp.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or
+# implied.  See the License for the specific language governing
+# permissions and limitations under the License.
+
+
+# For each given subnet drop the current route (if any) and set a new
+# route through the CVPN.
+#
+# For example:
+#
+# ./curveball-vpn-subnet 140.247/16 18.9/16
+#
+# This will create routes to 140.247/16 and 18.9/16 through the VPN.
+#
+# NOTE: if there are more specific routes to elements in these subnets,
+# those routes will NOT be deleted and the routes to those subnets
+# (or hosts) will NOT be modified.
+#
+# NOTE: this program assumes that the VPN uses tun0 as its tunnel
+# interface.  This might not be true, and if there's a tun0 and it is
+# not being used for CVPN, then the result is undefined and probably
+# badly broken.
+
+INET=$(/sbin/ifconfig tun0 | /bin/grep 'inet addr:')
+if [ $? -ne 0 ]; then
+  echo "ERROR: no VPN device detected."
+  exit 1
+fi
+
+GW=$(echo ${INET} | sed -e 's/:/ /g' | /usr/bin/awk '{print $3}')
+rc=0
+
+for SUBNET in $*; do
+  # If there's no route already set for this subnet, then when we
+  # attempt to delete it, ip might gripe.  Suppress this.
+  #
+  sudo /sbin/ip route delete ${SUBNET} 2> /dev/null
+  sudo /sbin/ip route add ${SUBNET} via ${GW}
+  if [ $? -eq 0 ]; then
+    echo "Routing ${SUBNET} via VPN at ${GW}"
+  else
+    echo "WARNING: Couldn't route ${SUBNET} via VPN"
+    rc=1
+  fi
+done
+
+exit ${rc}

@@ -1,0 +1,305 @@
+#!/bin/sh
+#
+# This material is based upon work supported by the Defense Advanced
+# Research Projects Agency under Contract No. N66001-11-C-4017.
+#
+# Copyright 2014 - Raytheon BBN Technologies Corp.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or
+# implied.  See the License for the specific language governing
+# permissions and limitations under the License.
+
+
+# Pushes generated sentinel list files and sentinel Bloom filter files
+# out to the DPs and DRs.
+#
+# Currently only tested regularly with exactly one DR and DP.
+#
+# You should think seriously about setting up your ssh keys and/or
+# ssh-agent before running this, because otherwise you're going to
+# get very tired of typing your password/passphrase over and over.
+#
+# The list of DR and DP hosts can be taken from a file (with the -f option).
+# The format of this file that each line must begin with either a comment
+# (everything between a # and the end of the line), or "dr:" or "dp:"
+# followed by a hostname.  For example:
+#
+#    dr: xxx
+#    dp: yyy
+#
+# indicates that "xxx" is a DR and "yyy" is a DP.  Note that a single
+# host can be treated as both a dr and dp.
+#
+# If a network name is specified (via the -n option) then that network
+# name is added to each name in the host file.  For example, using
+# option "-n example.com" would cause hostname "xxx" to be treated as
+# "xxx.example.com"
+
+
+# logging/diagnostic functions
+script_name=$(basename "$0")
+log() { printf '%s: %s\n' "${script_name}" "$*"; }
+error() { log "ERROR: $*" >&2; }
+fatal() { error "$*"; exit 1; }
+usage_fatal() { error "$*"; usage >&2; exit 1; }
+
+RSYNC=/usr/bin/rsync
+SSH=/usr/bin/ssh
+#RSYNC=echo
+
+SENT_SUFFIX=sent*
+SENT_BF_SUFFIX=sbf*
+DHEXP_SUFFIX=dhexp*
+
+#DP_DEST_DIR=/tmp/dp/sentinels
+#DR_DEST_DIR=/tmp/dr/bloomfilters
+
+SCRIPTDIR=$(/bin/readlink -f $(/usr/bin/dirname $(/usr/bin/which "$0")))
+CLEANUP=${SCRIPTDIR}/cb-noc-cleanup
+
+DEFAULTSRCDIR="out"
+
+node_exists() {
+    # echo "NODE $1"
+
+    nodename="$1"
+    ping -q -c 1 -w 1 ${nodename} > /dev/null 2>&1
+    res=$?
+    return $res
+}
+
+# assume that we're using the same login locally as on the DP and DR.
+#
+DR_USER=${USER}
+DP_USER=${USER}
+
+push_dp() {
+
+    dp=$1
+
+    node_exists "${dp}"
+    if [ $? -eq 0 ]; then
+#	dp_dest_dir=/tmp/${dp}/sentinels
+	dp_dest_dir=/tmp/dp/sentinels
+
+	log "PUSHING TO DP ${dp}:${dp_dest_dir}"
+
+	${SSH} ${DP_USER}@${dp} "/bin/sh -c 'mkdir -p -m 0755 ${dp_dest_dir}'"
+
+	# copy the DH exp files before copying the sentinel
+	# files to avoid a race condition: we can't use the
+	# sentinel files until the DH exp files are there
+	#
+	# NOTE: we don't generate DH exp in all versions.
+	# OMITTED FROM THIS RELEASE
+	#
+	# ${RSYNC} -r --delay-updates ${SRCDIR}/*.${DHEXP_SUFFIX} \
+	# 	${DP_USER}@${dp}:${dp_dest_dir}/
+
+	${RSYNC} -r --delay-updates ${SRCDIR}/*.${SENT_SUFFIX} \
+		${DP_USER}@${dp}:${dp_dest_dir}/
+
+	${SSH} "${DP_USER}@${dp}" "${CLEANUP}" "${dp_dest_dir}"
+
+	if [ $? -ne 0 ]; then
+	    log "ERROR synching with DP ${dp}"
+	    rc=1
+	    exit 1
+	fi
+    # else
+	# log SKIPPING MISSING DP $nodename 
+    fi
+}
+
+push_dr() {
+
+    dr=$1
+
+    node_exists "${dr}"
+    if [ $? -eq 0 ]; then
+	dr_dest_dir=/tmp/dr/bloomfilters
+
+	log "PUSHING TO DR ${dr}:${dr_dest_dir}"
+
+	${SSH} ${DR_USER}@${dr} "/bin/sh -c 'mkdir -p -m 0755 ${dr_dest_dir}'"
+	${RSYNC} -r --delay-updates ${SRCDIR}/*.${SENT_BF_SUFFIX} \
+		${DR_USER}@${dr}:${dr_dest_dir}/
+
+	${SSH} "${DR_USER}@${dr}" "${CLEANUP}" "${dr_dest_dir}"
+
+	if [ $? -ne 0 ]; then
+	    log "ERROR synching with DR ${dr}"
+	    rc=1
+	    exit 1
+	fi
+    # else 
+	# log SKIPPING MISSING DR $nodename
+    fi
+}
+
+onedig="0 1 2 3 4 5 6 7 8 9"
+twodig=""
+
+for digit1 in $onedig; do
+    for digit0 in $onedig; do
+	twodig="$twodig $digit1$digit0"
+    done
+done
+
+NAME_SUFFIXES="$onedig $twodig"
+
+rc=0
+
+guess_host_names() {
+    # These suffixes are based on the way we name things
+    # in our current experiments.  Probably not very general.
+    #
+    SUFFS=$NAME_SUFFIXES
+
+    local network
+    local host
+    local suff
+
+    local DP_HOSTS="dp drp"
+    local DR_HOSTS="dr drp"
+
+    if [ "${NETWORKNAME}" != "" ]; then
+	network=".$NETWORKNAME"
+    else
+	network=""
+    fi
+
+    for host in $DP_HOSTS; do
+	ALL_DP_HOSTS="$ALL_DP_HOSTS $host$network"
+    done
+
+    for host in $DP_HOSTS; do
+	for suff in $SUFFS; do
+	    ALL_DP_HOSTS="$ALL_DP_HOSTS $host$suff$network"
+	done
+    done
+
+    for host in $DR_HOSTS; do
+	ALL_DR_HOSTS="$ALL_DR_HOSTS $host$network"
+    done
+
+    for host in $DR_HOSTS; do
+	for suff in $SUFFS; do
+	    ALL_DR_HOSTS="$ALL_DR_HOSTS $host$suff$network"
+	done
+    done
+}
+
+load_host_names() {
+    fname=$1
+
+    local drs
+    local dps
+    local host
+
+    if [ "${NETWORKNAME}" != "" ]; then
+	network=".$NETWORKNAME"
+    else
+	network=""
+    fi
+
+    drs=$(grep "^dr:" $fname | sed -e 's/^.*:\s*//' -e 's/\s*#.*$//')
+    dps=$(grep "^dp:" $fname | sed -e 's/^.*:\s*//' -e 's/\s*#.*$//')
+
+    for host in $dps; do
+	ALL_DP_HOSTS="$ALL_DP_HOSTS $host$network"
+    done
+
+    for host in $drs; do
+	ALL_DR_HOSTS="$ALL_DR_HOSTS $host$network"
+    done
+}
+
+usage() {
+    echo "usage $0 [options] [SRCDIR]"
+    echo ""
+    echo "-h        print help message and exit"
+    echo "-f fname  load dr/dp hostnames from the named file"
+    echo "-n name   use the given name as network suffix"
+    echo ""
+    echo "If SRCDIR is not specified, $DEFAULTSRCDIR is used"
+    echo ""
+}
+
+HOSTFILE=""
+NETWORKNAME=""
+
+while getopts "hf:n:" opt; do
+    case $opt in
+	h)
+	    usage
+	    exit 1
+	    ;;
+	f)
+	    HOSTFILE="$OPTARG"
+	    ;;
+	n)
+	    NETWORKNAME="$OPTARG"
+	    ;;
+	*)
+	    usage
+	    exit 1
+	    ;;
+    esac
+done
+shift $((OPTIND -1 ))
+
+if [ $# -gt 1 ]; then
+    usage
+    exit 1
+fi
+
+if [ $# -eq 1 ]; then
+    SRCDIR=${1}
+else
+    SRCDIR='out'
+fi
+
+ALL_DP_HOSTS=""
+ALL_DR_HOSTS=""
+
+if [ "${HOSTFILE}" = "" ]; then
+    guess_host_names
+else
+    if [ ! -r "${HOSTFILE}" ]; then
+	fatal "host file ($HOSTFILE) not readable"
+	exit 1
+    fi
+
+    load_host_names "${HOSTFILE}"
+fi
+
+if [ ! -d "${SRCDIR}" ]; then
+    fatal "SRCDIR ($SRCDIR) does not exist"
+fi
+
+log using SRCDIR ${SRCDIR} # debugging
+
+for name in $ALL_DP_HOSTS ; do
+    push_dp "$name"
+done
+
+for name in $ALL_DR_HOSTS ; do
+    push_dr "$name"
+done
+
+# Cleanup the scratch directory
+#
+if [ -x "${CLEANUP}" ]; then
+    "${CLEANUP}" "${SRCDIR}"
+fi
+
+exit 0

@@ -1,0 +1,232 @@
+#!/bin/bash
+#
+# This material is based upon work supported by the Defense Advanced
+# Research Projects Agency under Contract No. N66001-11-C-4017.
+#
+# Copyright 2014 - Raytheon BBN Technologies Corp.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or
+# implied.  See the License for the specific language governing
+# permissions and limitations under the License.
+
+SHORTNAME=curveball-dr
+VERSION="0.1-53"
+TARGETDIR=/opt/curveball
+
+THISDIR=$(dirname "$0")
+BUILD_TREE_TOOL=${THISDIR}/build-tree
+DESCRIBE_BUILD_TOOL=${THISDIR}/describe-build
+SCRATCHDIR=./tmp-debbuild-dr
+INSTALLDIR="${SCRATCHDIR}"/"${TARGETDIR}"
+DEBDIR="${SCRATCHDIR}"/DEBIAN
+BUILD_DESCRIPTION=${INSTALLDIR}/build-info.txt
+
+# logging/diagnostic functions
+script_name=$(basename "$0")
+log() { printf '%s: %s\n' "${script_name}" "$*"; }
+error() { log "ERROR: $*" >&2; }
+fatal() { error "$*"; exit 1; }
+usage_fatal() { error "$*"; usage >&2; exit 1; }
+
+ARCHITECTURE=$(dpkg --print-architecture)
+
+# remove particularly large files or directories that end up in the build,
+# but are unnecessary so they can be removed from the .deb.
+#
+# This is somewhat ad-hoc and needs to be kept up-to-date.
+
+remove_bloat() {
+
+    UNNEEDED="sentinels/keys"
+
+    for bloat in ${UNNEEDED}; do
+	target="${INSTALLDIR}/${bloat}"
+	if [ -e "${target}" ]; then
+	    rm -rf "${target}"
+	else
+	    log "target" ${target} "not found"
+	fi
+    done
+
+    rm -f "${INSTALLDIR}"/scripts/*.log
+    rm -f "${INSTALLDIR}"/scripts/*.log.?
+
+    rm -f "${INSTALLDIR}"/experiments/*.log
+    rm -f "${INSTALLDIR}"/experiments/*.log.?
+
+    rm -rf "${INSTALLDIR}"/experiments/out
+    rm -rf "${INSTALLDIR}"/out
+    rm -rf "${INSTALLDIR}"/scripts/out
+    rm -rf "${INSTALLDIR}"/sentinels/out
+    rm -rf "${INSTALLDIR}"/sentinels/sdata
+
+    return 0
+}
+
+add_build_info() {
+
+    "${DESCRIBE_BUILD_TOOL}" > "${INSTALLDIR}"/build-info.txt
+    return 0
+}
+
+add_docs() {
+
+    docdir="${INSTALLDIR}"/doc
+    mkdir -p "${docdir}"
+    cp "${THISDIR}/../docs/InstallTestbed.txt" "${docdir}"
+    cp "${THISDIR}/../docs/QUILTING.txt" "${docdir}"
+    cp "${builddir}/experiments/helloworld.ns" "${docdir}"
+    cp "${builddir}/experiments/helloquilt.ns" "${docdir}"
+    cp "${THISDIR}/install-nodes" "${docdir}"
+
+    return 0
+}
+
+add_click() {
+
+    # add click and our click modules
+    rm -rf "${INSTALLDIR}"/click
+    mkdir "${INSTALLDIR}"/click
+    cp "${THISDIR}"/../click/click-01072013.tar.gz "${INSTALLDIR}"/click
+    cp "${THISDIR}"/../click/Makefile.deb "${INSTALLDIR}"/click/Makefile
+    cp -pR "${THISDIR}"/../click/curveball "${INSTALLDIR}"/click/
+}
+
+# Clean up after earlier builds
+if [ -e "${SCRATCHDIR}" ]; then
+    /bin/rm -rf "${SCRATCHDIR}"
+fi
+
+mkdir -p "${INSTALLDIR}"
+if [ ! -d "${INSTALLDIR}" ]; then
+    fatal scratch install directory could not be created
+fi
+
+builddir=$(${BUILD_TREE_TOOL} dirname)
+
+if [ ! -d "${builddir}" ]; then
+    fatal Build directory "${builddir}" does not exist
+fi
+
+(cd "${builddir}"; tar cf - .) | (cd "${INSTALLDIR}" ; tar xf -)
+
+mkdir "${DEBDIR}"
+
+( cd "${SCRATCHDIR}" ;
+    find . -type f | grep -v './DEBIAN/' \
+	| xargs md5sum ) > "${DEBDIR}"/md5sums
+
+cat > "${DEBDIR}"/control << EOF
+Package: ${SHORTNAME}
+Version: ${VERSION}
+Section: base
+Priority: optional
+Architecture: ${ARCHITECTURE}
+Maintainer: Raytheon / BBN Technologies
+Description: Curveball DR release
+EOF
+
+cat "${DEBDIR}"/control
+
+cat >> "${DEBDIR}"/control << EOF
+Depends: \
+	build-essential, g++, texinfo, openssh-server, quagga, \
+	python, python-dev, iperf, python-dumbnet, swig, libnspr4-dev, \
+	python-dpkt, python-ipaddr, python-m2crypto, libsqlite3-dev, \
+	libnetfilter-queue1, nmap, \
+	zlib1g-dev, python-pexpect, \
+	curl, debsums, ethtool
+EOF
+
+cat >> "${DEBDIR}"/postinst << EOF
+#!/bin/sh
+# post install for ${SHORTNAME} ${VERSION}
+
+PLATFORM=\$(echo "${ARCHITECTURE}-${OSTYPE}" | sed -e s/amd64/x86_64/)
+
+# Not needed for the DR?
+# if [ ! -f /lib/\${PLATFORM}/libc.so ]; then
+#   sudo /bin/ln -s /lib/\${PLATFORM}/libc.so.6 /lib/\${PLATFORM}/libc.so \
+#       || exit 1
+# fi
+
+echo "BUILDING CLICK"
+cd $TARGETDIR/click ; sudo make || exit 1
+
+exit 0
+EOF
+chmod 755 "${DEBDIR}"/postinst
+
+cat >> "${DEBDIR}"/prerm << EOF
+#!/bin/sh
+# pre remove for ${SHORTNAME} ${VERSION}
+
+/bin/rm -rf "${TARGETDIR}/click/"*
+
+exit 0
+EOF
+chmod 755 "${DEBDIR}"/prerm
+
+make_preinst() {
+
+    BUILD_SYS=$(lsb_release -is)
+    BUILD_REL=$(lsb_release -rs)
+    BUILD_HOST="$BUILD_SYS $BUILD_REL"
+
+    cat >> "${DEBDIR}"/preinst << EOF
+#!/bin/sh
+# pre install for ${SHORTNAME} ${VERSION}
+
+MSG="ERROR: this package was compiled for $BUILD_HOST"
+if [ \$(lsb_release -is) != "$BUILD_SYS" ]; then
+    echo ""
+    echo \$MSG
+    echo ""
+    exit 1
+fi
+if [ \$(lsb_release -rs) != "$BUILD_REL" ]; then
+    echo ""
+    echo \$MSG
+    echo ""
+    exit 1
+fi
+
+exit 0
+EOF
+
+    chmod 755 "${DEBDIR}"/preinst
+}
+
+add_click
+remove_bloat
+add_build_info
+add_docs
+make_preinst
+
+# This apparently is needed for some platforms
+#
+find "${INSTALLDIR}" -type d | xargs chmod 755
+# find "${INSTALLDIR}" -type f | xargs chmod a+r
+
+# Clean up some permissions that dpkg thinks are weird.
+find "${INSTALLDIR}/python" -type f | xargs chmod 0644
+# find "${INSTALLDIR}/lib" -type f | xargs chmod 0644
+find "${INSTALLDIR}/scripts" -executable | xargs chmod 0755
+find "${INSTALLDIR}" -perm 0664 | xargs chmod 0644
+find "${INSTALLDIR}" -perm 0775 | xargs chmod 0755
+
+/usr/bin/fakeroot dpkg-deb --build "${SCRATCHDIR}" || fatal dpkg-deb failed
+
+mv "${SCRATCHDIR}".deb "${SHORTNAME}_${VERSION}_${ARCHITECTURE}.deb"
+
+# FIXME: clean up after ourselves.  right now it's still handy
+# to look at the scratch dir.
+# rm -rf "${SCRATCHDIR}"

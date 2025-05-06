@@ -1,0 +1,151 @@
+#!/bin/sh
+#
+# This material is based upon work supported by the Defense Advanced
+# Research Projects Agency under Contract No. N66001-11-C-4017.
+#
+# Copyright 2014 - Raytheon BBN Technologies Corp.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or
+# implied.  See the License for the specific language governing
+# permissions and limitations under the License.
+
+# A quick script to create x509 certs, using a given CA key and cert.  Note
+# that CA is not intended to be secure: it creates certificates that are signed
+# by a self-signed, insecure root CA, and uses passphrases that are trivial to
+# guess by anyone familiar with this code.  It is meant only as a proof of
+# concept, to generate placeholder certificates for experiments in a safe,
+# SHELTERED environment.
+#
+# Tries to avoid re-creating the key or the cert based on that key.  Will use
+# intermediate files instead of re-creating them, so if you want something new,
+# remove current files first.
+#
+# usage: ./make-node-cert node-name [node-name ...]
+
+RSA_KEYSIZE=4096	# adjust as necessary
+LIFETIME_DAYS=1461	# four years
+CA_CERT_DIR=CA
+
+CA_NAME=CURVEBALL_CA
+CA_KEY=${CA_CERT_DIR}/${CA_NAME}.key
+CA_CERT=${CA_CERT_DIR}/${CA_NAME}.pem
+CA_SRL=${CA_CERT_DIR}/${CA_NAME}.srl
+
+CERT_DIR=CERTS
+
+NODE_CONF=node.cnf
+
+create_node_cert() {
+
+    # TODO: param sanity checking!
+
+    if [ -z "$1" ]; then
+	echo "WARNING: Empty name; not creating cert"
+	return 1
+    fi
+
+    name=$1
+    certfile="${CERT_DIR}/${name}.pem"
+    keyfile="${CERT_DIR}/${name}.key"
+    extfile="${CERT_DIR}/${name}.ext"
+    reqfile="${CERT_DIR}/${name}.req"
+    passphrase="guess-${name}"
+
+    if [ -e "${certfile}" ]; then
+	echo "WARNING: ${certfile} already exists; skipping it"
+	return 0
+    fi
+
+    if [ -e "${keyfile}" ]; then
+	echo "Keyfile for $name already exists; using it"
+    else
+	openssl genrsa -des \
+		-passout "pass:${passphrase}" \
+		-out "${keyfile}.tmp" ${RSA_KEYSIZE}
+	if [ $? -ne 0 ]; then
+	    echo "ERROR: openssl genrsa failed for node $name"
+	    exit 1
+	fi
+
+	# This creates a version of the key that doesn't require a passphrase.
+	#
+	# This is exactly the sort of thing a real CA wouldn't be caught doing.
+	#
+	openssl rsa -passin "pass:${passphrase}" \
+		-in "${keyfile}.tmp" -out "${keyfile}"
+	rc=$?
+	rm -f "${keyfile}.tmp"
+
+	if [ $rc -ne 0 ]; then
+	    rm -f "${keyfile}"
+	    echo "ERROR: Could not remove passphrase from key for $name"
+	    exit 1
+	fi
+    fi
+
+    cat > "${extfile}" << .
+basicConstraints     = CA:FALSE
+nsCertType           = server,client,objsign
+keyUsage             = nonRepudiation,digitalSignature,keyEncipherment,dataEncipherment,keyAgreement
+extendedKeyUsage     = serverAuth,clientAuth
+subjectKeyIdentifier = hash
+subjectAltName       = DNS:${name}
+.
+
+    NAME="${name}" openssl req -new \
+	    -config "${NODE_CONF}" \
+	    -key "${keyfile}" -out "${reqfile}" \
+	    -passin "pass:guess-${name}"
+    if [ $? -ne 0 ]; then
+	echo "ERROR: openssl req failed for node $name"
+	exit 1
+    fi
+
+    echo "Creating certificate for $name"
+
+    NAME="${name}" openssl x509 -req \
+	    -CA "${CA_CERT}" -CAkey ${CA_KEY} \
+	    -days "${LIFETIME_DAYS}" \
+	    -extfile "${extfile}" \
+	    -sha256 \
+	    -in "${reqfile}" -out "${certfile}"
+    rc=$?
+    rm -f "${reqfile}" "${extfile}"
+
+    if [ $rc -ne 0 ]; then
+	rm -f "${reqfile}"
+	echo "ERROR: openssl x509 failed for node $name"
+	exit 1
+    fi
+
+}
+
+if [ ! -d "${CA_CERT_DIR}" ]; then
+    echo "ERROR: ${CA_CERT_DIR} missing; no CA"
+    exit 1
+fi
+
+if [ ! -d "${CERT_DIR}" ]; then
+    echo "ERROR: ${CERT_DIR} missing; no place to store certificates"
+    exit 1
+fi
+
+for name in $* ; do
+    create_node_cert "${name}"
+    if [ $? -ne 0 ]; then
+	exit 1
+    fi
+
+done
+
+git commit --no-status -m 'updated serial number' "${CA_SRL}"
+
+exit 0

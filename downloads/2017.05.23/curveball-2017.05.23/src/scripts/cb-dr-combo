@@ -1,0 +1,241 @@
+#!/usr/bin/env python
+#
+# This material is funded in part by a grant from the United States
+# Department of State. The opinions, findings, and conclusions stated
+# herein are those of the authors and do not necessarily reflect
+# those of the United States Department of State.
+#
+# Copyright 2016 - Raytheon BBN Technologies Corp.
+#
+# Licensed under the Apache License, Version 2.0 (the "License"); you
+# may not use this file except in compliance with the License.
+#
+# You may obtain a copy of the License at
+# http://www.apache.org/licenses/LICENSE-2.0.
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or
+# implied. See the License for the specific language governing
+# permissions and limitations under the License.
+
+"""
+Runs the DR software (both click and the dr2dp code) and the DP software
+together from one process.
+"""
+
+import atexit
+import errno
+import optparse
+import os
+import signal
+import subprocess
+import sys
+import time
+
+# The directory that this executable lives in.
+DIRNAME = os.path.normpath(
+        os.path.abspath(os.path.dirname(sys.argv[0]) or '.'))
+
+sys.path.append(os.path.normpath(os.path.join(DIRNAME, '..', 'python')))
+
+import cb.util.cblogging_setup
+
+import cb.util.unbuffered
+cb.util.unbuffered.unbuffer()
+
+import cb.util.cblogging
+
+def parse_args():
+    """
+    parse the commandline
+    """
+
+    default_conf = os.path.normpath(os.path.join(DIRNAME, 'decoyproxy.conf'))
+
+    parser = optparse.OptionParser()
+
+    parser.add_option("-c", "--configfile", dest="config_file",
+            default=default_conf,
+            help="cb-dp configuration file [default=%default]",
+            metavar="FILENAME")
+
+    permitted_subnet = '10.0.0.0/8'
+    parser.add_option('--permitted-subnet', default=permitted_subnet,
+            help='Specify the subnet that is permitted for proxying ' +
+                    '[default=%s]' % permitted_subnet,
+            metavar='IPv4-CIDR')
+
+    parser.add_option("-i", "--iface",
+                      default="eth0",
+                      help="Interface to listen on for client->decoy packets; "
+                           "defaults to eth0")
+
+    parser.add_option("-r", "--riface",
+                      default="eth1",
+                      help="Interface to listen on for decoy->client packets; "
+                           "defaults to eth1")
+
+    parser.add_option("-u", "--upstream_neighbor",
+                      default="10.0.1.1",
+                      metavar="IPADDR",
+                      help="IP address of upstream neighbor to be used as "
+                           "source of UDP notifications; "
+                           "defaults to 10.0.1.1")
+
+    parser.add_option("--stat_interval",
+                      default="1",
+                      metavar="SEC",
+                      help="Interval in seconds to print packet statistics "
+                           "[default=%default].")
+
+    parser.add_option("--disable_segments",
+                      action="store_true",
+                      default=False,
+                      help="Disable segmented flow processing.")
+
+    parser.add_option("--max_idle",
+                      default="10",
+                      metavar="COUNT",
+                      help="Number of intervals of zero incoming packets "
+                           "allowed before shutting down the DR.  If zero, "
+                           "no check is made"
+                           "[default=%default].")
+
+    (opts, _args) = parser.parse_args()
+
+    if opts.stat_interval < 0:
+        print "ERROR: stat_interval must be >= 0"
+        sys.exit(1)
+
+    if opts.max_idle < 0:
+        print "ERROR: max_idle must be >= 0"
+        sys.exit(1)
+
+    return opts
+
+def run_dp(opts):
+    """
+    Start the decoy proxy
+    """
+
+    dp_path = os.path.normpath(os.path.join(DIRNAME, 'cb-dp'))
+
+    argv = list()
+    argv.append(dp_path)
+
+    argv.append('--permitted-subnet')
+    argv.append(opts.permitted_subnet)
+
+    argv.append('--configfile')
+    argv.append(opts.config_file)
+
+    proc = subprocess.Popen(
+            argv, stdout=sys.stdout, stderr=sys.stderr, bufsize=1)
+
+    return proc
+
+def run_dr(opts):
+    """
+    Start the decoy router
+    """
+
+    dr_path = os.path.normpath(os.path.join(DIRNAME, 'cb-dr'))
+
+    argv = list()
+    argv.append(dr_path)
+
+    argv.append('--decoyproxy')
+    argv.append('localhost:4001')
+
+    argv.append('--iface')
+    argv.append(opts.iface)
+
+    argv.append('--riface')
+    argv.append(opts.riface)
+
+    argv.append('--upstream_neighbor')
+    argv.append(opts.upstream_neighbor)
+
+    argv.append('--stat_interval')
+    argv.append(opts.stat_interval)
+
+    argv.append('--max_idle')
+    argv.append(opts.max_idle)
+
+    if opts.disable_segments:
+        argv.append('--disable_segments')
+
+    proc = subprocess.Popen(
+            argv, stdout=sys.stdout, stderr=sys.stderr, bufsize=1)
+
+    return proc
+
+def kill_subproc(proc, name):
+
+    print "Stopping %s" % name
+
+    try:
+        proc.send_signal(signal.SIGHUP)
+    except OSError as err:
+        if err.errno != errno.ESRCH:
+            print 'ERROR: failed to stop %s: %s' % name, os.strerror(err)
+        return
+
+    time.sleep(1)
+
+def kill_dp():
+    global DP_PROC
+    kill_subproc(DP_PROC, "DP")
+
+def kill_dr():
+    global DR_PROC
+    kill_subproc(DR_PROC, "DR")
+
+def stop_signal(signum, frame):
+    """
+    General signal handler: try to clean up via atexit.
+    """
+
+    print 'Stopping due to signal %d' % signum
+    sys.exit(1)
+
+
+DP_PROC = None
+DR_PROC = None
+
+def main():
+
+    global DP_PROC
+    global DR_PROC
+
+    opts = parse_args()
+
+    signal.signal(signal.SIGHUP, stop_signal)
+    signal.signal(signal.SIGINT, stop_signal)
+    signal.signal(signal.SIGQUIT, stop_signal)
+    signal.signal(signal.SIGTERM, stop_signal)
+
+    DP_PROC = run_dp(opts)
+    time.sleep(5)  # guesstimate
+
+    if DP_PROC.poll():
+        print 'ERROR: decoy proxy did not start'
+        sys.exit(1)
+
+    atexit.register(kill_dp)
+
+    DR_PROC = run_dr(opts)
+    time.sleep(5)  # guesstimate
+
+    if DR_PROC.poll():
+        print 'ERROR: decoy router did not start'
+        sys.exit(1)
+
+    atexit.register(kill_dr)
+
+    DR_PROC.wait()
+    kill_dp()
+
+if __name__ == '__main__':
+    exit(main())
